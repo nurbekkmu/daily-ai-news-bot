@@ -46,7 +46,9 @@ def fetch_article(candidate: dict) -> dict:
             allow_redirects=True,
         )
         resp.raise_for_status()
-        text = _extract_text(resp.text)
+        # Cap how much HTML we parse — some pages are megabytes of markup and
+        # only MAX_ARTICLE_CHARS of extracted text is used anyway.
+        text = _extract_text(resp.text[:500_000])
 
         if len(text) >= config.MIN_ARTICLE_CHARS:
             candidate["content"] = text[: config.MAX_ARTICLE_CHARS]

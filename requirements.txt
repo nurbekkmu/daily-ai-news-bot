@@ -1,5 +1,8 @@
-requests>=2.31.0
-beautifulsoup4>=4.12.3
-ddgs>=9.0.0
-google-genai>=0.3.0
-python-dotenv>=1.0.1
+# Pinned exact versions: workflows install these on every run, so floating
+# (>=) versions would silently pull in new/compromised releases. Update
+# deliberately by bumping the pins.
+requests==2.34.2
+beautifulsoup4==4.15.0
+ddgs==9.14.4
+google-genai==2.10.0
+python-dotenv==1.2.2

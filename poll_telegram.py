@@ -58,7 +58,7 @@ def _get_updates(offset: int = None) -> list[dict]:
         logger.error("Telegram API error: %s", result.get("description"))
         return []
     except Exception as e:
-        logger.error("Error fetching Telegram updates: %s", e)
+        logger.error("Error fetching Telegram updates: %s", telegram_sender._redact(str(e)))
         return []
 
 
@@ -79,7 +79,7 @@ def _answer_callback_query(callback_query_id: str, text: str = "Latest news requ
         resp.raise_for_status()
         logger.info("Answered callback query")
     except Exception as e:
-        logger.warning("Error answering callback query: %s", e)
+        logger.warning("Error answering callback query: %s", telegram_sender._redact(str(e)))
 
 
 def _select_top_per_topic(articles: list[dict]) -> dict[str, list[dict]]:

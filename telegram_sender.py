@@ -24,6 +24,15 @@ SEND_DELAY_SECONDS = 2.5  # delay between article sends
 _MARKDOWN_SPECIAL_CHARS = ("_", "*", "`", "[")
 
 
+def _redact(text: str) -> str:
+    """Strip the bot token from text before logging. Exception messages from
+    requests include the full API URL (which embeds the token), and GitHub
+    Actions logs on a public repo are visible to everyone."""
+    if config.TELEGRAM_TOKEN:
+        return text.replace(config.TELEGRAM_TOKEN, "***TOKEN***")
+    return text
+
+
 def _escape_markdown(text: str) -> str:
     """Escape Telegram Markdown (V1) special characters in dynamic text.
     Titles and summaries often contain *, _ or ` — unescaped, an unbalanced
@@ -113,7 +122,10 @@ def _send_message(text: str, reply_markup: str = None) -> None:
             return
         except Exception as e:  # noqa: BLE001
             last_err = e
-            logger.warning("Telegram send failed (attempt %d/%d): %s", attempt, config.MAX_RETRIES, e)
+            logger.warning(
+                "Telegram send failed (attempt %d/%d): %s",
+                attempt, config.MAX_RETRIES, _redact(str(e)),
+            )
             if attempt < config.MAX_RETRIES:
                 time.sleep(config.RETRY_BACKOFF_SECONDS * attempt)
 
@@ -168,7 +180,10 @@ def send_digest(articles_by_topic: dict[str, list[dict]]) -> dict[str, list[dict
                 _send_message(message, reply_markup=button_markup)
             except Exception as e:  # noqa: BLE001 - one bad article must not kill the digest
                 failed_count += 1
-                logger.error("Giving up on article '%s' after retries: %s", article["title"], e)
+                logger.error(
+                    "Giving up on article '%s' after retries: %s",
+                    article["title"], _redact(str(e)),
+                )
             else:
                 seen.mark_seen(article["url"])
                 actually_sent.setdefault(topic, []).append(article)
