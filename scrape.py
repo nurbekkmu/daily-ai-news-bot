@@ -5,6 +5,8 @@ so the pipeline never hard-fails on a single bad source.
 """
 
 import logging
+from concurrent.futures import ThreadPoolExecutor
+
 import requests
 from bs4 import BeautifulSoup
 
@@ -46,6 +48,11 @@ def fetch_article(candidate: dict) -> dict:
             allow_redirects=True,
         )
         resp.raise_for_status()
+        # requests falls back to ISO-8859-1 when the server sends no charset
+        # header, which garbles pages that are actually UTF-8. Trust the
+        # header when present, otherwise use the encoding sniffed from content.
+        if "charset" not in resp.headers.get("Content-Type", "").lower():
+            resp.encoding = resp.apparent_encoding
         # Cap how much HTML we parse — some pages are megabytes of markup and
         # only MAX_ARTICLE_CHARS of extracted text is used anyway.
         text = _extract_text(resp.text[:500_000])
@@ -68,11 +75,12 @@ def fetch_article(candidate: dict) -> dict:
 
 
 def fetch_all(candidates: list[dict]) -> list[dict]:
-    """Scrape every candidate. Returns the same list, enriched in place."""
-    enriched = []
-    for c in candidates:
-        enriched.append(fetch_article(c))
-    return enriched
+    """Scrape all candidates in parallel (they're independent HTTP fetches,
+    so sequential fetching just stacks up timeouts). Order is preserved."""
+    if not candidates:
+        return []
+    with ThreadPoolExecutor(max_workers=config.SCRAPE_MAX_WORKERS) as pool:
+        return list(pool.map(fetch_article, candidates))
 
 
 if __name__ == "__main__":

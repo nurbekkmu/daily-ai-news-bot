@@ -54,6 +54,7 @@ def domain_matches(domain: str, domain_set: set) -> bool:
 
 # ---- Scraping ----
 REQUEST_TIMEOUT_SECONDS = 12
+SCRAPE_MAX_WORKERS = 8         # article fetches are independent -> parallelize
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
@@ -110,4 +111,13 @@ RETRY_BACKOFF_SECONDS = 5
 
 # ---- Deduplication ----
 SEEN_RETENTION_DAYS = 30  # keep dedup records for 30 days, then purge old entries
+
+# Semantic dedup: different outlets covering the same story are different
+# URLs, so URL hashing can't catch them. Candidates whose title+snippet
+# embeddings are more similar than the threshold are treated as one story
+# and only the best source is kept. Tune with care: too low merges distinct
+# stories about the same company; too high lets duplicates through.
+SEMANTIC_DEDUP_ENABLED = True
+SEMANTIC_SIM_THRESHOLD = 0.80
+EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "gemini-embedding-001")
 

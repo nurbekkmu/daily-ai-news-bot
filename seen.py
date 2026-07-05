@@ -9,10 +9,16 @@ import logging
 import sqlite3
 import hashlib
 from datetime import datetime, timedelta
+from urllib.parse import urlparse, parse_qsl, urlencode
 
 import config
 
 logger = logging.getLogger(__name__)
+
+# Query parameters that identify a *visit*, not an article. The same story
+# arrives with different utm_ tags depending on where the search engine found
+# it, so they must not affect the dedup hash.
+_TRACKING_PARAM_PREFIXES = ("utm_", "fbclid", "gclid", "mc_", "ref_", "cmpid")
 
 # Anchor the DB next to this file so runs from any working directory share state
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "seen.db")
@@ -47,9 +53,29 @@ def init_db():
         logger.error("Failed to initialize seen.db: %s", e)
 
 
+def normalize_url(url: str) -> str:
+    """Normalize a URL so trivial variants of the same article dedup together:
+    lowercase scheme/host, http -> https, drop tracking params, drop fragment,
+    drop trailing slash. 'HTTP://Site.com/a/?utm_source=x#top' and
+    'https://site.com/a' hash the same."""
+    try:
+        parts = urlparse(url.strip())
+        scheme = "https" if parts.scheme.lower() in ("http", "https") else parts.scheme.lower()
+        host = parts.netloc.lower().removeprefix("www.")
+        path = parts.path.rstrip("/")
+        query_pairs = [
+            (k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True)
+            if not k.lower().startswith(_TRACKING_PARAM_PREFIXES)
+        ]
+        query = urlencode(query_pairs)
+        return f"{scheme}://{host}{path}" + (f"?{query}" if query else "")
+    except ValueError:
+        return url.strip()
+
+
 def _hash_url(url: str) -> str:
-    """Generate SHA256 hash of a URL."""
-    return hashlib.sha256(url.encode()).hexdigest()
+    """Generate SHA256 hash of a normalized URL."""
+    return hashlib.sha256(normalize_url(url).encode()).hexdigest()
 
 
 def is_seen(url: str) -> bool:
