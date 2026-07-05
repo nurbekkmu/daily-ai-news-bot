@@ -81,6 +81,32 @@ def test_parse_response_no_hashtags():
     assert tags == []
 
 
+def test_parse_response_keeps_why_it_matters_line():
+    summary, tags = summarize.parse_response(
+        "A new model was released.\nWhy it matters: it halves inference cost.\n#AI"
+    )
+    assert "Why it matters: it halves inference cost." in summary
+    assert tags == ["#AI"]
+
+
+# ---- archive ----
+
+def test_archive_article_roundtrip(tmp_path, monkeypatch):
+    import sqlite3
+
+    monkeypatch.setattr(seen, "DB_PATH", str(tmp_path / "test_seen.db"))
+    seen.init_db()
+    seen.archive_article(
+        {"title": "T", "domain": "reuters.com", "url": "https://r.com/a",
+         "summary": "S", "hashtags": ["#AI", "#ML"]},
+        topic="AI",
+    )
+    rows = sqlite3.connect(seen.DB_PATH).execute(
+        "SELECT topic, title, domain, url, summary, hashtags FROM archive"
+    ).fetchall()
+    assert rows == [("AI", "T", "reuters.com", "https://r.com/a", "S", "#AI #ML")]
+
+
 # ---- telegram_sender._escape_markdown ----
 
 def test_escape_markdown_escapes_specials():

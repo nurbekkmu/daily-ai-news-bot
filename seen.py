@@ -1,7 +1,14 @@
 """
-Deduplication via SQLite (seen.db).
-Stores URL hashes (SHA256) and date_sent to avoid resending articles.
-Provides filtering and purge functions for state persistence across runs.
+State persistence via SQLite (seen.db).
+
+Three tables:
+  seen           - URL hashes + date_sent, so articles are never resent
+                   (purged after SEEN_RETENTION_DAYS)
+  archive        - full record of every article ever delivered: date, topic,
+                   title, source, url, summary, hashtags. Never purged —
+                   the workflows commit seen.db back to the repo, so this
+                   doubles as a permanent, searchable news archive.
+  telegram_state - last processed update_id for the on-demand poller
 """
 
 import os
@@ -44,6 +51,18 @@ def init_db():
             CREATE TABLE IF NOT EXISTS telegram_state (
                 key TEXT PRIMARY KEY,
                 value TEXT
+            )
+        """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS archive (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                date_sent TEXT NOT NULL,
+                topic TEXT,
+                title TEXT,
+                domain TEXT,
+                url TEXT,
+                summary TEXT,
+                hashtags TEXT
             )
         """)
         conn.commit()
@@ -108,6 +127,30 @@ def mark_seen(url: str) -> None:
         conn.close()
     except Exception as e:
         logger.error("Error marking URL as seen: %s", e)
+
+
+def archive_article(article: dict, topic: str) -> None:
+    """Append a delivered article to the permanent archive."""
+    try:
+        conn = _get_connection()
+        conn.execute(
+            "INSERT INTO archive (date_sent, topic, title, domain, url, summary, hashtags) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                datetime.now().strftime("%Y-%m-%d %H:%M"),
+                topic,
+                article.get("title", ""),
+                article.get("domain", ""),
+                article.get("url", ""),
+                article.get("summary", ""),
+                " ".join(article.get("hashtags", [])),
+            ),
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        # Archiving is best-effort: never let it interfere with delivery
+        logger.error("Error archiving article: %s", e)
 
 
 def purge_old_seen() -> None:

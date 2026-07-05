@@ -14,6 +14,8 @@ LLMs), each as its own message:
 > A 4–6 sentence factual summary of the article, written by Gemini from the
 > scraped article text. No hype, no invented details.
 >
+> Why it matters: one grounded sentence on the practical significance.
+>
 > #AI #DeepMind #Research
 >
 > [Read more](…)
@@ -43,7 +45,14 @@ send      individual Telegram messages, marked as seen one by one
 
 State lives in a SQLite file (`seen.db`) that the workflow commits back to
 the repo after every run — that's how a stateless CI runner remembers what
-it already sent you. Sent-article hashes are kept for 30 days.
+it already sent you. Sent-article hashes are kept for 30 days for dedup, and
+every delivered article (date, topic, title, source, summary, hashtags) is
+also appended to a permanent `archive` table in the same file — a growing,
+queryable history of everything the bot ever sent:
+
+```bash
+sqlite3 seen.db "SELECT date_sent, topic, title FROM archive ORDER BY id DESC LIMIT 10"
+```
 
 Two layers of dedup:
 

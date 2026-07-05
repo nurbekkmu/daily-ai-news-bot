@@ -196,6 +196,7 @@ def send_digest(articles_by_topic: dict[str, list[dict]]) -> dict[str, list[dict
                 )
             else:
                 seen.mark_seen(article["url"])
+                seen.archive_article(article, topic)
                 actually_sent.setdefault(topic, []).append(article)
                 sent_count += 1
 
