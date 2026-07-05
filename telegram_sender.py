@@ -132,6 +132,16 @@ def _send_message(text: str, reply_markup: str = None) -> None:
     raise last_err
 
 
+def send_notice(text: str) -> None:
+    """Send a short service message (keeps the refresh button attached).
+    Used so an on-demand request always gets SOME reply — silence after a
+    button tap is indistinguishable from the bot being broken."""
+    try:
+        _send_message(text, reply_markup=_get_news_button_markup())
+    except Exception as e:  # noqa: BLE001 - a notice is best-effort
+        logger.error("Failed to send notice: %s", _redact(str(e)))
+
+
 def send_digest(articles_by_topic: dict[str, list[dict]]) -> dict[str, list[dict]]:
     """Send each article as an individual message with delays between sends.
     Skips articles that failed to summarize (summarization_failed=True or summary=None).

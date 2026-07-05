@@ -152,7 +152,14 @@ def poll():
         _answer_callback_query(callback_query_id, "Getting latest news...")
 
     # Run the pipeline (update_id was already persisted above)
-    pipeline.run()
+    sent = pipeline.run()
+    if not sent:
+        # The request was heard but there's nothing to deliver — say so,
+        # otherwise a button tap that finds no news looks like a dead bot.
+        telegram_sender.send_notice(
+            "Nothing new since the last digest — all current articles were "
+            "already sent. Try again in a few hours."
+        )
 
 
 if __name__ == "__main__":
