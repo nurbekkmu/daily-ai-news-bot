@@ -9,7 +9,7 @@ stays serverless and free using GitHub Actions.
 Flow:
   1. Check for new Telegram updates (getUpdates) since last processed update_id
   2. If update contains "/news" command or "news_command" callback_query, trigger run
-  3. Run the full pipeline: search → scrape → dedup → summarize → send
+  3. Run the shared pipeline (pipeline.py): search → dedup → scrape → summarize → send
   4. Update the stored update_id so the same command is never processed twice
   5. Exit cleanly if nothing new found
 """
@@ -20,12 +20,9 @@ load_dotenv()
 
 import logging
 import requests
-from collections import defaultdict
 
 import config
-import search
-import scrape
-import summarize
+import pipeline
 import seen
 import telegram_sender
 
@@ -80,66 +77,6 @@ def _answer_callback_query(callback_query_id: str, text: str = "Latest news requ
         logger.info("Answered callback query")
     except Exception as e:
         logger.warning("Error answering callback query: %s", telegram_sender._redact(str(e)))
-
-
-def _select_top_per_topic(articles: list[dict]) -> dict[str, list[dict]]:
-    """Group articles by topic and keep top N per topic — trusted news
-    outlets first, then scraped content over snippet fallback."""
-    by_topic = defaultdict(list)
-    for a in articles:
-        by_topic[a["topic"]].append(a)
-
-    selected = {}
-    for topic, items in by_topic.items():
-        items_sorted = sorted(
-            items,
-            key=lambda a: (
-                0 if config.domain_matches(a["domain"], config.TRUSTED_DOMAINS) else 1,
-                0 if a["content_source"] == "scraped" else 1,
-            ),
-        )
-        selected[topic] = items_sorted[: config.ITEMS_PER_TOPIC]
-
-    return selected
-
-
-def run_on_demand_pipeline() -> bool:
-    """Run the full pipeline on-demand. Returns True if articles were sent."""
-    logger.info("=== On-demand pipeline triggered ===")
-    
-    logger.info("Step 1/4: searching DuckDuckGo for %d topics", len(config.TOPICS))
-    candidates = search.gather_candidates()
-    if not candidates:
-        logger.error("No search candidates found — aborting run.")
-        return False
-
-    logger.info("Step 2/4: scraping %d candidate articles", len(candidates))
-    enriched = scrape.fetch_all(candidates)
-
-    logger.info("Step 2.5/4: filtering duplicate articles")
-    enriched = seen.filter_articles(enriched)
-    if not enriched:
-        logger.warning("All articles have been seen before — nothing new to send.")
-        return False
-    
-    logger.info("Selecting top %d articles per topic", config.ITEMS_PER_TOPIC)
-    selected_by_topic = _select_top_per_topic(enriched)
-    total_selected = sum(len(v) for v in selected_by_topic.values())
-    logger.info("Selected %d articles total", total_selected)
-
-    if total_selected == 0:
-        logger.error("No articles survived selection — aborting run.")
-        return False
-
-    logger.info("Step 3/4: summarizing selected articles with Gemini")
-    for topic, items in selected_by_topic.items():
-        selected_by_topic[topic] = summarize.summarize_all(items)
-
-    logger.info("Step 4/4: sending digest to Telegram (articles are marked seen as they send)")
-    actually_sent = telegram_sender.send_digest(selected_by_topic)
-
-    logger.info("=== On-demand pipeline complete ===")
-    return bool(actually_sent)
 
 
 def poll():
@@ -215,7 +152,7 @@ def poll():
         _answer_callback_query(callback_query_id, "Getting latest news...")
 
     # Run the pipeline (update_id was already persisted above)
-    run_on_demand_pipeline()
+    pipeline.run()
 
 
 if __name__ == "__main__":
