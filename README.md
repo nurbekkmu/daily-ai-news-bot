@@ -1,85 +1,134 @@
-# On-Demand AI News Digest Bot
+# daily-ai-news-bot
 
-Zero-cost, on-demand Telegram digest of AI/ML/DL/NLP news. Send `/news` or tap
-the "🔄 Get Latest News" button and the bot searches DuckDuckGo, scrapes full
-article text, summarizes with Gemini's free tier (rotating across multiple API
-keys), and DMs the articles to your personal chat — all orchestrated by
-GitHub Actions (no server). There is no automatic daily schedule: news arrives
-only when you ask for it.
+A Telegram bot that fetches, filters, deduplicates and summarizes AI/ML news
+on demand — running entirely on GitHub Actions. No server, no hosting bill.
+
+Send `/news` (or tap the button under any digest message) and a few minutes
+later you get up to 8 fresh articles, two per topic (AI, ML, deep learning,
+LLMs), each as its own message:
+
+> **AI**
+> **DeepMind's new model solves protein interactions**
+> _nature.com_
+>
+> A 4–6 sentence factual summary of the article, written by Gemini from the
+> scraped article text. No hype, no invented details.
+>
+> #AI #DeepMind #Research
+>
+> [Read more](…)
 
 ## How it works
 
 ```
-GitHub Actions (poll every 5 min, triggered by /news or button tap)
-  -> search.py       DuckDuckGo search, 1 query per topic (AI, ML, DL, NLP)
-  -> scrape.py        fetch + parse full article text (snippet fallback if blocked)
-  -> poll_telegram.py  keep top 2 articles per topic (8 per request)
-  -> summarize.py    Gemini free tier, multi-key rotation -> summary + "why it matters" + hashtags
-  -> telegram_sender.py   send individual article messages to your personal chat
+/news in Telegram
+      │   (GitHub Actions cron polls getUpdates every 5 min)
+      ▼
+search    DuckDuckGo news index, one query per topic, last 24h only
+      ▼
+filter    blocklist (Wikipedia/Medium/Reddit/...) → already-sent URLs dropped
+      ▼
+dedup     semantic: Gemini embeddings + cosine similarity catch the same
+          story from different outlets; the trusted outlet wins
+      ▼
+scrape    full article text in parallel; snippet fallback when a site blocks
+      ▼
+rank      trusted outlets (Reuters, Nature, arXiv, TechCrunch, ...) first
+      ▼
+summarize Gemini 2.5 Flash — also a quality gate: replies SKIP for SEO junk,
+          homepages, and off-topic pages, which are then dropped
+      ▼
+send      individual Telegram messages, marked as seen one by one
 ```
 
-## On-Demand News
+State lives in a SQLite file (`seen.db`) that the workflow commits back to
+the repo after every run — that's how a stateless CI runner remembers what
+it already sent you. Sent-article hashes are kept for 30 days.
 
-Each article message includes a "🔄 Get Latest News" button. You can also send `/news` to your bot anytime.
+Two layers of dedup:
 
-Behind the scenes:
-- GitHub Actions runs `poll_telegram.py` every 5 minutes
-- Detects your `/news` command or button tap
-- Triggers the same pipeline above
-- Sends fresh (deduplicated) articles directly to you
-- Max latency: ~5 minutes (polling interval)
-- Cost: still free (just GitHub Actions)
+- **URL level** — SHA-256 of the *normalized* URL (tracking params, `www.`,
+  trailing slashes and `http/https` differences stripped), so the same link
+  arriving dressed differently doesn't repeat.
+- **Story level** — titles + snippets are embedded with Gemini and clustered
+  by cosine similarity, so Reuters and TechCrunch covering the same
+  announcement produce one message, not two. Fails open: if the embedding
+  call errors, the digest still goes out.
 
-**Tradeoff:** Polling-based (not a live webhook), so there's no instant response. But it stays serverless and costs nothing.
+## Design decisions
 
-See [`ON_DEMAND_FEATURE.md`](./ON_DEMAND_FEATURE.md) for technical details.
+**Polling instead of a webhook.** A webhook needs a server listening 24/7;
+this bot instead lets a GitHub Actions cron check for new `/news` commands
+every 5 minutes. Honest trade-off: GitHub's cron isn't punctual under load,
+so real-world latency is 5–20 minutes. Fine for a news digest; the upgrade
+path if I ever want instant delivery is a Telegram webhook triggering
+`repository_dispatch`.
 
-## One-time setup
+**Failure modes are handled, not hoped away:**
 
-### 1. Create the Telegram bot
-- Message **@BotFather** on Telegram -> `/newbot` -> follow prompts -> save the token.
+- The Telegram `update_id` is persisted *before* the pipeline runs, so a
+  crashing run can't re-trigger the same `/news` every 5 minutes forever.
+- Each article is marked seen immediately after *its own* send succeeds — a
+  crash mid-digest never causes resent messages.
+- Gemini free-tier keys rotate round-robin; on a 429 the next key is tried
+  immediately instead of sleeping.
+- Scraped content is untrusted: the prompt tells Gemini to treat embedded
+  "ignore previous instructions" text as article content, never as commands.
+- Bot tokens are redacted from logs (Actions logs on a public repo are
+  public too).
+- Telegram rejecting malformed Markdown degrades to plain text instead of
+  dropping the article.
+- `/news` from anyone but the owner's chat is ignored.
+- A monthly keep-alive commit stops GitHub from auto-disabling the cron
+  after 60 days of repo inactivity.
 
-### 2. Get your personal chat ID
-- Open Telegram and send a message to your bot (e.g., `/start`).
-- Visit `https://api.telegram.org/bot<YOUR_TOKEN>/getUpdates` in a browser.
-- Look for the **first message** in the response — copy the numeric `"id"` field from `"chat"`.
-- Example: `"chat":{"id": 123456789}` → save `123456789` as your chat ID.
-- This allows the bot to send you direct messages.
+## Setup
 
-### 3. Get free Gemini API keys (several!)
-- Go to [Google AI Studio](https://aistudio.google.com/app/apikey) -> create an API key.
-- The free tier is rate-limited **per Google Cloud project**, so create 2-4 keys
-  from different Google accounts (or different Cloud projects) and combine them
-  comma-separated: `key1,key2,key3`. The bot rotates between them automatically.
+You need: a Telegram bot token, your chat id, and at least one Gemini API key.
 
-### 4. Push this repo to GitHub, add secrets
-In your repo: **Settings -> Secrets and variables -> Actions -> New repository secret**, add:
-- `GEMINI_API_KEYS` (comma-separated list of keys)
-- `TELEGRAM_TOKEN`
-- `TELEGRAM_CHAT_ID`
+1. Create a bot with [@BotFather](https://t.me/BotFather) → get `TELEGRAM_TOKEN`.
+2. Message your bot once, then visit
+   `https://api.telegram.org/bot<TOKEN>/getUpdates` — your `chat.id` is
+   `TELEGRAM_CHAT_ID`.
+3. Get a free Gemini key at [aistudio.google.com](https://aistudio.google.com/apikey).
+   Several keys from different Google accounts raise your effective rate
+   limit — set them comma-separated in `GEMINI_API_KEYS`.
+4. Fork this repo and add those three values as GitHub Actions secrets
+   (Settings → Secrets and variables → Actions).
+5. Enable workflows in the Actions tab. Send `/news` to your bot.
 
-### 5. Test it
-Go to the **Actions** tab -> "AI News Digest (manual only)" -> **Run workflow**
-(manual trigger) to confirm everything works, then send `/news` to your bot.
-
-## Local testing (optional)
+For local runs, copy `.env.example` to `.env`, fill in the same values, and:
 
 ```bash
-python -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env   # fill in your keys (GEMINI_API_KEY, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID)
-python main.py         # load_dotenv() automatically loads variables from .env
+python main.py
 ```
 
-## Notes & known limitations
+Never commit your local `seen.db` — the copy in the repo is written by the
+workflows, and a manual push can conflict with theirs.
 
-- **Scraping is best-effort.** Paywalled or Cloudflare-protected sites will fail
-  to scrape and fall back to the DuckDuckGo search snippet instead — the pipeline
-  never crashes because of one bad source.
-- **Gemini free tier has rate limits.** At 8 articles/day this is well within
-  free-tier limits, but if you raise `ITEMS_PER_TOPIC` a lot, watch for 429s.
-- **No Prefect.** GitHub Actions' cron + `workflow_dispatch` covers scheduling,
-  and each module has its own lightweight retry loop — Prefect would be
-  redundant infrastructure for a job this small.
-- Tune topics, item counts, and prompt wording in `config.py` — no need to
-  touch pipeline logic in the other files.
+## Repository layout
+
+```
+├── pipeline.py           the digest pipeline (search → dedup → scrape → summarize → send)
+├── main.py               entry point for manual runs
+├── poll_telegram.py      on-demand trigger: polls for /news, runs pipeline
+├── search.py             DuckDuckGo queries + domain blocklist
+├── semantic.py           embedding-based same-story dedup
+├── scrape.py             parallel article fetching with snippet fallback
+├── summarize.py          Gemini summaries + SKIP quality gate
+├── telegram_sender.py    message formatting, sending, crash-safe seen-marking
+├── seen.py               SQLite dedup state + URL normalization
+├── gemini.py             shared Gemini client with API-key rotation
+├── config.py             topics, domains, thresholds, prompt
+├── tests/                unit tests for the pure logic (pytest)
+└── .github/workflows     poll (5-min cron), manual run, tests, keep-alive
+```
+
+## Configuration
+
+Everything tunable is in `config.py`: topics and their search queries,
+articles per topic, trusted/blocked domains, the semantic similarity
+threshold (0.80), scrape timeouts, and the summarization prompt.
+
+MIT licensed.
