@@ -10,12 +10,29 @@ import os
 # generic/marketing junk, but broad enough to surface real news.
 # Queries run against the DDG NEWS index (already filtered to the last day),
 # so keep them plain topic phrases — words like "news today" only hurt matching.
+# These are the DEFAULT topics — they seed the topics table in seen.db on
+# first run. After that, manage topics from Telegram: /topics add <name>,
+# /topics remove <name>, /topics to list.
 TOPICS = {
     "AI": "artificial intelligence",
     "ML": "machine learning",
     "DL": "deep learning",
     "NLP": "large language models",
 }
+
+# ---- RSS sources ----
+# Primary sources arrive here before news outlets cover them, and they keep
+# the bot alive if DuckDuckGo search ever breaks. Feed URL -> topic label
+# (labels join the search topics in the digest, same ITEMS_PER_TOPIC cap).
+RSS_FEEDS = {
+    "https://huggingface.co/blog/feed.xml":                                    "Labs",
+    "https://deepmind.google/blog/rss.xml":                                    "Labs",
+    "https://www.technologyreview.com/topic/artificial-intelligence/feed":     "AI",
+    "https://rss.arxiv.org/rss/cs.CL":                                         "Research",
+    "https://rss.arxiv.org/rss/cs.LG":                                         "Research",
+}
+RSS_MAX_ITEMS_PER_FEED = 8     # arXiv lists 100+ new papers a day; take the top few
+RSS_MAX_AGE_HOURS = 48         # skip stale entries; undated entries pass through
 
 # How many article URLs to attempt per topic (some may fail to scrape, get
 # blocked as unreliable, or be rejected by the summarizer, so we fetch extra).
@@ -119,9 +136,34 @@ SEEN_RETENTION_DAYS = 30  # keep dedup records for 30 days, then purge old entri
 # Semantic dedup: different outlets covering the same story are different
 # URLs, so URL hashing can't catch them. Candidates whose title+snippet
 # embeddings are more similar than the threshold are treated as one story
-# and only the best source is kept. Tune with care: too low merges distinct
-# stories about the same company; too high lets duplicates through.
+# and only the best source is kept. Too low merges distinct stories about
+# the same company; too high lets duplicates through.
+# 0.78 comes from evals/eval_dedup.py: hardest different-story pairs score
+# below 0.75, same-story paraphrases score 0.78+ (1.00 precision / 1.00
+# recall on the labeled set). Rerun the eval before changing this.
 SEMANTIC_DEDUP_ENABLED = True
-SEMANTIC_SIM_THRESHOLD = 0.80
+SEMANTIC_SIM_THRESHOLD = 0.78
 EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "gemini-embedding-001")
+
+# ---- Personalization ----
+# Every digest message has 👍/👎 buttons. Reactions are stored, and future
+# candidates are ranked by embedding similarity to what you liked minus
+# similarity to what you disliked. With no feedback yet, ranking is unchanged.
+PERSONALIZATION_ENABLED = True
+
+# ---- Weekly roundup (/weekly) ----
+WEEKLY_PROMPT_TEMPLATE = """You are writing a weekly AI news roundup from the
+article summaries below (everything a news digest bot delivered in the last
+7 days).
+
+Group the stories into 2-4 themes. For each theme write a short paragraph
+that synthesizes what happened — connect related stories, don't just list
+them. Report only what the summaries state; no hype, no speculation. End
+with one sentence on the week's single most important development.
+
+Keep the whole roundup under 300 words. Plain text, no markdown headers.
+
+Articles:
+{items}
+"""
 
