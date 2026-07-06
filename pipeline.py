@@ -2,20 +2,23 @@
 The digest pipeline, shared by both entry points (main.py for manual/scheduled
 runs, poll_telegram.py for on-demand /news runs):
 
-    search -> drop already-sent -> semantic dedup -> scrape
-           -> select top N per topic -> summarize -> send
+    search + RSS -> drop already-sent -> semantic dedup -> personalize
+                 -> scrape -> select top N per topic -> summarize -> send
 
 Order notes:
   - The seen-filter runs BEFORE scraping so we never spend HTTP requests on
     articles we already delivered.
   - Semantic dedup also runs pre-scrape, on title + snippet, so duplicate
-    stories are dropped before we fetch them.
+    stories are dropped before we fetch them. It attaches embeddings, which
+    personalization then scores against past 👍/👎 feedback.
 """
 
 import logging
 from collections import defaultdict
 
 import config
+import personalize
+import rss
 import search
 import scrape
 import semantic
@@ -42,6 +45,7 @@ def select_top_per_topic(articles: list[dict]) -> dict[str, list[dict]]:
             items,
             key=lambda a: (
                 0 if config.domain_matches(a["domain"], config.TRUSTED_DOMAINS) else 1,
+                -a.get("_pref", 0.0),  # 👍/👎 history; 0 until feedback exists
                 0 if a["content_source"] == "scraped" else 1,
             ),
         )
@@ -60,8 +64,15 @@ def run() -> bool:
     logger.info("Purging seen entries older than %d days", config.SEEN_RETENTION_DAYS)
     seen.purge_old_seen()
 
-    logger.info("Step 1/5: searching DuckDuckGo for %d topics", len(config.TOPICS))
-    candidates = search.gather_candidates()
+    topics = seen.get_topics()
+    logger.info("Step 1/5: gathering candidates (%d search topics + %d RSS feeds)",
+                len(topics), len(config.RSS_FEEDS))
+    candidates = search.gather_candidates(topics)
+    known_urls = {c["url"] for c in candidates}
+    for c in rss.gather_candidates():
+        if c["url"] not in known_urls:
+            known_urls.add(c["url"])
+            candidates.append(c)
     if not candidates:
         logger.error("No search candidates found — aborting run (nothing to send).")
         return False
@@ -74,6 +85,9 @@ def run() -> bool:
 
     logger.info("Step 3/5: semantic dedup on %d candidates", len(candidates))
     candidates = semantic.dedupe(candidates)
+
+    logger.info("Ranking with feedback history")
+    personalize.attach_scores(candidates)
 
     logger.info("Step 4/5: scraping %d candidate articles", len(candidates))
     enriched = scrape.fetch_all(candidates)

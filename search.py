@@ -78,15 +78,17 @@ def _search_topic(topic: str, query: str, max_results: int) -> list[dict]:
     return results
 
 
-def gather_candidates() -> list[dict]:
+def gather_candidates(topics: dict[str, str] | None = None) -> list[dict]:
     """
-    Search all topics from config.TOPICS, dedupe by URL, and return a flat list
-    of candidate articles tagged with their topic.
+    Search all topics (default: config.TOPICS; the pipeline passes the
+    user-managed set from the topics table), dedupe by URL, and return a
+    flat list of candidate articles tagged with their topic.
     """
+    topics = topics or config.TOPICS
     seen_urls = set()
     all_candidates = []
 
-    for topic, query in config.TOPICS.items():
+    for topic, query in topics.items():
         logger.info("Searching topic '%s' -> query: %s", topic, query)
         results = _search_topic(topic, query, config.RESULTS_PER_TOPIC)
         for r in results:
@@ -95,7 +97,7 @@ def gather_candidates() -> list[dict]:
             seen_urls.add(r["url"])
             all_candidates.append(r)
 
-    logger.info("Gathered %d unique candidates across %d topics", len(all_candidates), len(config.TOPICS))
+    logger.info("Gathered %d unique candidates across %d topics", len(all_candidates), len(topics))
     return all_candidates
 
 
