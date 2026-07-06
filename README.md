@@ -74,7 +74,10 @@ the repo after every run — that's how a stateless CI runner remembers what
 it already sent you. Sent-article hashes are kept for 30 days for dedup, and
 every delivered article (date, topic, title, source, summary, hashtags) is
 also appended to a permanent `archive` table in the same file — a growing,
-queryable history of everything the bot ever sent:
+queryable history of everything the bot ever sent. Because this file lives
+in git history, size is managed deliberately: embeddings are truncated to
+768 dims (Matryoshka), rounded to 5 decimals, and nulled out after 60 days
+(feedback taps happen near delivery; the article text stays forever).
 
 ```bash
 sqlite3 seen.db "SELECT date_sent, topic, title FROM archive ORDER BY id DESC LIMIT 10"
@@ -96,10 +99,11 @@ The AI components are evaluated, not assumed to work (`evals/`):
 
 - **Semantic dedup** (`eval_dedup.py`): on a labeled set of same-story
   paraphrases vs. hard negatives (same company, different event), the
-  threshold sweep showed different-story pairs scoring below 0.75 and
-  same-story paraphrases at 0.78+. The configured threshold (0.78) scores
-  **1.00 precision / 1.00 recall** on that set — and it was moved from an
-  initial guess of 0.80 *because* the eval showed two missed duplicates.
+  configured threshold scores **1.00 precision / 1.00 recall**. It has
+  moved twice, both times because a measurement said so: 0.80 → 0.78 when
+  the first sweep caught two missed duplicates, then → 0.75 when switching
+  to 768-dim embeddings shifted the similarity distribution (the eval is
+  rerun whenever the embedding config changes).
 - **SKIP quality gate** (`eval_skip_gate.py`): **16/16 (100%)** on labeled
   cases — real news vs. tutorials, homepages, listicles, and off-topic
   articles the digest must reject.

@@ -268,10 +268,12 @@ def test_attach_scores_no_feedback_is_neutral(monkeypatch):
 
 
 def test_attach_scores_prefers_liked_direction(monkeypatch):
+    from datetime import datetime
+    today = datetime.now().strftime("%Y-%m-%d %H:%M")
     monkeypatch.setattr(config, "PERSONALIZATION_ENABLED", True)
     monkeypatch.setattr(
         personalize.seen, "get_feedback_embeddings",
-        lambda: [("up", [1.0, 0.0]), ("down", [0.0, 1.0])],
+        lambda: [("up", [1.0, 0.0], today), ("down", [0.0, 1.0], today)],
     )
     liked_like = _candidate("AI", "a.com", "scraped", "liked")
     liked_like["_embedding"] = [0.9, 0.1]
@@ -296,6 +298,57 @@ def test_topics_lifecycle(tmp_path, monkeypatch):
     assert seen.remove_topic("Robotics") is True
     assert seen.remove_topic("Robotics") is False
     assert "Robotics" not in seen.get_topics()
+
+
+def test_record_feedback_replaces_instead_of_accumulating(tmp_path, monkeypatch):
+    monkeypatch.setattr(seen, "DB_PATH", str(tmp_path / "t.db"))
+    seen.init_db()
+    seen.record_feedback("abc123", "up")
+    seen.record_feedback("abc123", "up")      # impatient re-tap
+    seen.record_feedback("abc123", "down")    # changed their mind
+
+    import sqlite3
+    rows = sqlite3.connect(seen.DB_PATH).execute(
+        "SELECT url_hash, verdict FROM feedback"
+    ).fetchall()
+    assert rows == [("abc123", "down")]       # one row, latest verdict wins
+
+
+def test_decay_weight_halves_at_half_life():
+    assert personalize._decay_weight(0) == 1.0
+    assert abs(personalize._decay_weight(config.PERSONALIZE_HALF_LIFE_DAYS) - 0.5) < 1e-9
+    assert personalize._decay_weight(config.PERSONALIZE_HALF_LIFE_DAYS * 10) < 0.01
+
+
+def test_weighted_centroid():
+    c = personalize._weighted_centroid([[1.0, 0.0], [0.0, 1.0]], [3.0, 1.0])
+    assert c == [0.75, 0.25]
+    assert personalize._weighted_centroid([[1.0]], [0.0]) is None
+
+
+def test_archive_embedding_rounded_and_purged(tmp_path, monkeypatch):
+    import sqlite3
+    monkeypatch.setattr(seen, "DB_PATH", str(tmp_path / "t.db"))
+    seen.init_db()
+    seen.archive_article(
+        {"title": "T", "domain": "d.com", "url": "https://d.com/a",
+         "summary": "S", "hashtags": [], "_embedding": [0.123456789, 1.0]},
+        topic="AI",
+    )
+    stored = sqlite3.connect(seen.DB_PATH).execute(
+        "SELECT embedding FROM archive"
+    ).fetchone()[0]
+    assert stored == "[0.12346, 1.0]"  # rounded to 5 decimals
+
+    # Backdate the row past the retention window, then purge
+    conn = sqlite3.connect(seen.DB_PATH)
+    conn.execute("UPDATE archive SET date_sent = '2020-01-01 00:00'")
+    conn.commit(); conn.close()
+    seen.purge_old_embeddings()
+    remaining = sqlite3.connect(seen.DB_PATH).execute(
+        "SELECT embedding, summary FROM archive"
+    ).fetchone()
+    assert remaining == (None, "S")  # vector gone, article text kept
 
 
 def test_state_kv_roundtrip(tmp_path, monkeypatch):
@@ -344,6 +397,100 @@ def test_cap_for_auto_no_cap_needed():
     assert pipeline.cap_for_auto(selected, limit=6) == selected
 
 
+# ---- the command router, end to end with everything external mocked ----
+
+def _run_poll(monkeypatch, tmp_path, updates):
+    """Drive poll_telegram.poll() against fake Telegram updates.
+    Returns (pipeline_runs, notices, callback_answers)."""
+    import poll_telegram
+
+    monkeypatch.setattr(seen, "DB_PATH", str(tmp_path / "t.db"))
+    monkeypatch.setattr(config, "TELEGRAM_CHAT_ID", "111")
+
+    pipeline_runs = []
+    notices = []
+    answers = []
+
+    monkeypatch.setattr(poll_telegram, "_get_updates", lambda offset=None: updates)
+    monkeypatch.setattr(poll_telegram, "_answer_callback_query",
+                        lambda cid, text: answers.append(text))
+    monkeypatch.setattr(
+        poll_telegram.pipeline, "run",
+        lambda auto=False: (pipeline_runs.append(auto),
+                            {"outcome": "sent", "counts": {}})[1],
+    )
+    monkeypatch.setattr(poll_telegram.telegram_sender, "send_notice",
+                        lambda text: notices.append(text))
+
+    poll_telegram.poll()
+    return pipeline_runs, notices, answers
+
+
+def _msg(update_id, chat_id, text):
+    return {"update_id": update_id,
+            "message": {"chat": {"id": chat_id}, "text": text}}
+
+
+def test_router_news_command_runs_pipeline_once(tmp_path, monkeypatch):
+    runs, notices, _ = _run_poll(monkeypatch, tmp_path, [
+        _msg(1, 111, "/news"),
+        _msg(2, 111, "/news"),   # queued twice -> still one run
+    ])
+    assert runs == [False]       # one run, not auto mode
+    assert notices == []         # outcome 'sent' -> no notice
+    assert seen.get_last_telegram_update_id() == 2
+
+
+def test_router_unknown_command_gets_help_once(tmp_path, monkeypatch):
+    runs, notices, _ = _run_poll(monkeypatch, tmp_path, [
+        _msg(5, 111, "/new"),
+        _msg(6, 111, "/nwes"),
+    ])
+    assert runs == []
+    assert len(notices) == 1 and notices[0].startswith("Commands:")
+
+
+def test_router_ignores_non_owner(tmp_path, monkeypatch):
+    runs, notices, answers = _run_poll(monkeypatch, tmp_path, [
+        _msg(7, 999, "/news"),
+        {"update_id": 8, "callback_query": {
+            "id": "cb1", "data": "fb:up:deadbeef",
+            "message": {"chat": {"id": 999}}}},
+    ])
+    assert runs == [] and notices == [] and answers == []
+    assert seen.get_last_telegram_update_id() == 8  # still consumed
+
+
+def test_router_feedback_recorded_and_answered(tmp_path, monkeypatch):
+    runs, notices, answers = _run_poll(monkeypatch, tmp_path, [
+        {"update_id": 9, "callback_query": {
+            "id": "cb2", "data": "fb:down:cafe1234",
+            "message": {"chat": {"id": 111}}}},
+    ])
+    assert runs == []
+    assert answers and "👎" in answers[0]
+    import sqlite3
+    rows = sqlite3.connect(seen.DB_PATH).execute(
+        "SELECT url_hash, verdict FROM feedback").fetchall()
+    assert rows == [("cafe1234", "down")]
+
+
+def test_router_topics_guard_last_topic(tmp_path, monkeypatch):
+    import poll_telegram
+    monkeypatch.setattr(seen, "DB_PATH", str(tmp_path / "t.db"))
+    notices = []
+    monkeypatch.setattr(poll_telegram.telegram_sender, "send_notice",
+                        lambda text: notices.append(text))
+    seen.init_db()
+    for label in list(seen.get_topics())[1:]:
+        seen.remove_topic(label)
+    only = list(seen.get_topics())[0]
+
+    poll_telegram.handle_topics_command(f"/topics remove {only}")
+    assert "only topic left" in notices[-1]
+    assert only in seen.get_topics()  # still there
+
+
 def test_feedback_and_stats(tmp_path, monkeypatch):
     monkeypatch.setattr(seen, "DB_PATH", str(tmp_path / "t.db"))
     seen.init_db()
@@ -353,7 +500,9 @@ def test_feedback_and_stats(tmp_path, monkeypatch):
     seen.record_feedback(seen.url_short_hash("https://r.com/a"), "up")
 
     rows = seen.get_feedback_embeddings()
-    assert rows == [("up", [0.5, 0.5])]
+    assert len(rows) == 1
+    verdict, emb, date = rows[0]
+    assert (verdict, emb) == ("up", [0.5, 0.5])
 
     stats = seen.get_stats()
     assert stats["total"] == 1

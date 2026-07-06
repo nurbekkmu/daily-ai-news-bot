@@ -163,18 +163,34 @@ SEEN_RETENTION_DAYS = 30  # keep dedup records for 30 days, then purge old entri
 # embeddings are more similar than the threshold are treated as one story
 # and only the best source is kept. Too low merges distinct stories about
 # the same company; too high lets duplicates through.
-# 0.78 comes from evals/eval_dedup.py: hardest different-story pairs score
-# below 0.75, same-story paraphrases score 0.78+ (1.00 precision / 1.00
-# recall on the labeled set). Rerun the eval before changing this.
+# 0.75 comes from evals/eval_dedup.py AT THE CONFIGURED EMBEDDING_DIMS —
+# similarities shift with dimensionality (at 768 dims the hardest
+# different-story pairs score below 0.75 and same-story paraphrases 0.75+,
+# giving 1.00 precision / 1.00 recall on the labeled set). Rerun the eval
+# whenever this, EMBEDDING_DIMS, or EMBEDDING_MODEL changes.
 SEMANTIC_DEDUP_ENABLED = True
-SEMANTIC_SIM_THRESHOLD = 0.78
+SEMANTIC_SIM_THRESHOLD = 0.75
 EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "gemini-embedding-001")
+
+# gemini-embedding-001 is a Matryoshka model: truncating to 768 dims keeps
+# nearly all retrieval quality at 1/4 the size. This matters here because
+# embeddings are stored in seen.db, which is committed to git — a full
+# 3072-dim vector is ~60 KB of JSON per article and would balloon the repo.
+EMBEDDING_DIMS = 768
 
 # ---- Personalization ----
 # Every digest message has 👍/👎 buttons. Reactions are stored, and future
 # candidates are ranked by embedding similarity to what you liked minus
 # similarity to what you disliked. With no feedback yet, ranking is unchanged.
 PERSONALIZATION_ENABLED = True
+# Old reactions matter less than recent ones: each reaction's weight halves
+# every N days, so early-days taste doesn't dominate forever.
+PERSONALIZE_HALF_LIFE_DAYS = 30
+
+# Archived embeddings are only needed while feedback on them is plausible;
+# after this many days they're nulled out to keep seen.db (and the git
+# history it lives in) small. Article text/summary stays forever.
+ARCHIVE_EMBEDDING_RETENTION_DAYS = 60
 
 # ---- Weekly roundup (/weekly) ----
 WEEKLY_PROMPT_TEMPLATE = """You are writing a weekly AI news roundup from the

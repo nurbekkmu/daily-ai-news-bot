@@ -88,11 +88,18 @@ def generate(prompt: str) -> str:
 
 
 def embed(texts: list[str]) -> list[list[float]]:
-    """Embed a batch of texts. Returns one vector per input text."""
+    """Embed a batch of texts. Returns one vector per input text,
+    truncated to config.EMBEDDING_DIMS (Matryoshka truncation — cosine
+    comparisons stay valid, we always divide by the norms)."""
+    from google.genai import types
+
     def call(client):
         result = client.models.embed_content(
             model=config.EMBEDDING_MODEL,
             contents=texts,
+            config=types.EmbedContentConfig(
+                output_dimensionality=config.EMBEDDING_DIMS
+            ),
         )
         return [e.values for e in result.embeddings]
 

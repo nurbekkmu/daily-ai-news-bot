@@ -198,11 +198,19 @@ def handle_topics_command(text: str) -> None:
         telegram_sender.send_notice(f"Added topic: {label}. It's included from the next /news.")
     elif action == "remove" and len(parts) == 3:
         label = parts[2].strip()
-        if seen.remove_topic(label):
+        topics = seen.get_topics()
+        if label in topics and len(topics) == 1:
+            # An empty topics table silently falls back to the config
+            # defaults — refusing is less surprising than resurrection.
+            telegram_sender.send_notice(
+                f"'{label}' is the only topic left — add another before removing it."
+            )
+        elif seen.remove_topic(label):
             telegram_sender.send_notice(f"Removed topic: {label}.")
         else:
-            current = ", ".join(seen.get_topics())
-            telegram_sender.send_notice(f"No topic '{label}'. Current topics: {current}")
+            telegram_sender.send_notice(
+                f"No topic '{label}'. Current topics: {', '.join(topics)}"
+            )
     else:
         topics = seen.get_topics()
         listing = "\n".join(f"  {label} — searches '{query}'" for label, query in topics.items())

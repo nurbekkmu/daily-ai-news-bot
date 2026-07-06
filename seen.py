@@ -182,7 +182,9 @@ def archive_article(article: dict, topic: str) -> None:
                 article.get("summary", ""),
                 " ".join(article.get("hashtags", [])),
                 url_short_hash(article.get("url", "")),
-                json.dumps(embedding) if embedding else None,
+                # 5 decimals is plenty for cosine math and ~2.5x smaller
+                # than full-precision floats in this git-committed file
+                json.dumps([round(x, 5) for x in embedding]) if embedding else None,
             ),
         )
         conn.commit()
@@ -215,11 +217,17 @@ def get_archive_since(days: int) -> list[dict]:
 # ---- feedback (👍/👎 personalization) ----
 
 def record_feedback(url_hash: str, verdict: str) -> None:
-    """Store a thumbs up/down reaction for a delivered article."""
+    """Store a thumbs up/down reaction for a delivered article.
+
+    One row per article: re-taps replace instead of accumulate (a delayed
+    toast makes people tap twice, and duplicates would silently over-weight
+    that article in the preference centroid). Tapping the other thumb later
+    changes your verdict."""
     if verdict not in ("up", "down"):
         return
     try:
         conn = _get_connection()
+        conn.execute("DELETE FROM feedback WHERE url_hash = ?", (url_hash,))
         conn.execute(
             "INSERT INTO feedback (url_hash, verdict, date) VALUES (?, ?, ?)",
             (url_hash, verdict, datetime.now().strftime("%Y-%m-%d %H:%M")),
@@ -231,18 +239,19 @@ def record_feedback(url_hash: str, verdict: str) -> None:
         logger.error("Error recording feedback: %s", e)
 
 
-def get_feedback_embeddings() -> list[tuple[str, list[float]]]:
-    """(verdict, embedding) for every reaction whose article has a stored
-    embedding — the training signal for personalized ranking."""
+def get_feedback_embeddings() -> list[tuple[str, list[float], str]]:
+    """(verdict, embedding, date) for every reaction whose article has a
+    stored embedding — the training signal for personalized ranking. The
+    date lets the ranking decay old reactions."""
     try:
         conn = _get_connection()
         rows = conn.execute(
-            "SELECT f.verdict, a.embedding FROM feedback f "
+            "SELECT f.verdict, a.embedding, f.date FROM feedback f "
             "JOIN archive a ON a.url_hash = f.url_hash "
             "WHERE a.embedding IS NOT NULL"
         ).fetchall()
         conn.close()
-        return [(verdict, json.loads(emb)) for verdict, emb in rows]
+        return [(verdict, json.loads(emb), date) for verdict, emb, date in rows]
     except Exception as e:
         logger.error("Error reading feedback embeddings: %s", e)
         return []
@@ -306,6 +315,29 @@ def get_stats() -> dict:
     except Exception as e:
         logger.error("Error computing stats: %s", e)
         return {}
+
+
+def purge_old_embeddings() -> None:
+    """Null out archived embeddings older than the retention window.
+    Feedback taps happen close to delivery, so old vectors add nothing to
+    the preference centroid — but at several KB each in a git-committed
+    file, they add plenty to repo history. Article text stays forever."""
+    cutoff = (
+        datetime.now() - timedelta(days=config.ARCHIVE_EMBEDDING_RETENTION_DAYS)
+    ).strftime("%Y-%m-%d %H:%M")
+    try:
+        conn = _get_connection()
+        cursor = conn.execute(
+            "UPDATE archive SET embedding = NULL "
+            "WHERE embedding IS NOT NULL AND date_sent < ?",
+            (cutoff,),
+        )
+        conn.commit()
+        conn.close()
+        if cursor.rowcount:
+            logger.info("Purged %d embeddings older than %s", cursor.rowcount, cutoff)
+    except Exception as e:
+        logger.error("Error purging old embeddings: %s", e)
 
 
 def purge_old_seen() -> None:

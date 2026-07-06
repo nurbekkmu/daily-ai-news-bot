@@ -91,6 +91,7 @@ def run(auto: bool = False) -> dict:
 
     logger.info("Purging seen entries older than %d days", config.SEEN_RETENTION_DAYS)
     seen.purge_old_seen()
+    seen.purge_old_embeddings()
 
     topics = seen.get_topics()
     logger.info("Step 1/5: gathering candidates (%d search topics + %d RSS feeds)",
