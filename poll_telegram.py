@@ -44,6 +44,16 @@ logging.basicConfig(
 
 TELEGRAM_API_BASE = "https://api.telegram.org/bot{token}"
 
+HELP_TEXT = (
+    "Commands:\n"
+    "  /news — get the latest digest\n"
+    "  /weekly — roundup of the last 7 days\n"
+    "  /stats — delivery and feedback statistics\n"
+    "  /topics — list topics; /topics add <name>, /topics remove <name>\n\n"
+    "Replies can take a few minutes — the bot checks for commands every "
+    "5 minutes."
+)
+
 
 def _get_updates(offset: int = None) -> list[dict]:
     """Fetch new Telegram updates (messages, callback queries)."""
@@ -186,6 +196,10 @@ def poll():
                 news_requested = True
             elif text in ("/weekly", "/stats") or text.startswith("/topics"):
                 commands.append(text)
+            else:
+                # Typos happen (/new, /nwes...). Never ignore the owner
+                # silently — that looks identical to a dead bot.
+                commands.append("/help")
             logger.info("Command '%s' (update_id=%s)", text.split()[0], update_id)
 
         callback = update.get("callback_query", {})
@@ -211,6 +225,7 @@ def poll():
                     )
 
     # Lightweight commands first (they read the archive, not the news)
+    help_sent = False
     for command in commands:
         if command == "/weekly":
             roundup.send_weekly()
@@ -218,6 +233,9 @@ def poll():
             handle_stats()
         elif command.startswith("/topics"):
             handle_topics_command(command)
+        elif command == "/help" and not help_sent:
+            telegram_sender.send_notice(HELP_TEXT)
+            help_sent = True
 
     # The pipeline runs at most once per poll no matter how many taps queued up
     if news_requested:
