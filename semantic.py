@@ -49,6 +49,11 @@ def dedupe(candidates: list[dict]) -> list[dict]:
         logger.warning("Embedding failed (%s) — skipping semantic dedup this run", e)
         return candidates
 
+    # Attach each candidate's embedding: personalize.py scores against it,
+    # and the archive stores it so 👍/👎 feedback has a vector to learn from.
+    for c, vec in zip(candidates, vectors):
+        c["_embedding"] = vec
+
     # Greedy clustering: visit candidates best-source-first; keep one only if
     # it isn't too similar to anything already kept.
     order = sorted(range(len(candidates)), key=lambda i: _priority(candidates[i]))

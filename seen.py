@@ -1,17 +1,20 @@
 """
 State persistence via SQLite (seen.db).
 
-Three tables:
+Tables:
   seen           - URL hashes + date_sent, so articles are never resent
                    (purged after SEEN_RETENTION_DAYS)
   archive        - full record of every article ever delivered: date, topic,
-                   title, source, url, summary, hashtags. Never purged —
-                   the workflows commit seen.db back to the repo, so this
-                   doubles as a permanent, searchable news archive.
+                   title, source, url, summary, hashtags, embedding. Never
+                   purged — the workflows commit seen.db back to the repo,
+                   so this doubles as a permanent, searchable news archive.
+  feedback       - 👍/👎 reactions per article, used to personalize ranking
+  topics         - the active search topics, editable from Telegram
   telegram_state - last processed update_id for the on-demand poller
 """
 
 import os
+import json
 import logging
 import sqlite3
 import hashlib
@@ -62,9 +65,37 @@ def init_db():
                 domain TEXT,
                 url TEXT,
                 summary TEXT,
-                hashtags TEXT
+                hashtags TEXT,
+                url_hash TEXT,
+                embedding TEXT
             )
         """)
+        # Databases created before these columns existed migrate in place
+        for column in ("url_hash TEXT", "embedding TEXT"):
+            try:
+                cursor.execute(f"ALTER TABLE archive ADD COLUMN {column}")
+            except sqlite3.OperationalError:
+                pass  # column already exists
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS feedback (
+                url_hash TEXT NOT NULL,
+                verdict TEXT NOT NULL,
+                date TEXT NOT NULL
+            )
+        """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS topics (
+                label TEXT PRIMARY KEY,
+                query TEXT NOT NULL
+            )
+        """)
+        # Seed topics from config defaults on first run only — after that,
+        # Telegram /topics commands are the source of truth.
+        if not cursor.execute("SELECT 1 FROM topics LIMIT 1").fetchone():
+            cursor.executemany(
+                "INSERT INTO topics (label, query) VALUES (?, ?)",
+                list(config.TOPICS.items()),
+            )
         conn.commit()
         conn.close()
         logger.info("Initialized seen.db")
@@ -129,13 +160,19 @@ def mark_seen(url: str) -> None:
         logger.error("Error marking URL as seen: %s", e)
 
 
+def url_short_hash(url: str) -> str:
+    """16-char hash used in Telegram callback_data (which caps at 64 bytes)."""
+    return _hash_url(url)[:16]
+
+
 def archive_article(article: dict, topic: str) -> None:
     """Append a delivered article to the permanent archive."""
+    embedding = article.get("_embedding")
     try:
         conn = _get_connection()
         conn.execute(
-            "INSERT INTO archive (date_sent, topic, title, domain, url, summary, hashtags) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO archive (date_sent, topic, title, domain, url, summary, hashtags, url_hash, embedding) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 datetime.now().strftime("%Y-%m-%d %H:%M"),
                 topic,
@@ -144,6 +181,8 @@ def archive_article(article: dict, topic: str) -> None:
                 article.get("url", ""),
                 article.get("summary", ""),
                 " ".join(article.get("hashtags", [])),
+                url_short_hash(article.get("url", "")),
+                json.dumps(embedding) if embedding else None,
             ),
         )
         conn.commit()
@@ -151,6 +190,122 @@ def archive_article(article: dict, topic: str) -> None:
     except Exception as e:
         # Archiving is best-effort: never let it interfere with delivery
         logger.error("Error archiving article: %s", e)
+
+
+def get_archive_since(days: int) -> list[dict]:
+    """Articles delivered in the last N days, oldest first."""
+    cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d %H:%M")
+    try:
+        conn = _get_connection()
+        rows = conn.execute(
+            "SELECT date_sent, topic, title, domain, summary FROM archive "
+            "WHERE date_sent >= ? ORDER BY id",
+            (cutoff,),
+        ).fetchall()
+        conn.close()
+        return [
+            {"date_sent": r[0], "topic": r[1], "title": r[2], "domain": r[3], "summary": r[4]}
+            for r in rows
+        ]
+    except Exception as e:
+        logger.error("Error reading archive: %s", e)
+        return []
+
+
+# ---- feedback (👍/👎 personalization) ----
+
+def record_feedback(url_hash: str, verdict: str) -> None:
+    """Store a thumbs up/down reaction for a delivered article."""
+    if verdict not in ("up", "down"):
+        return
+    try:
+        conn = _get_connection()
+        conn.execute(
+            "INSERT INTO feedback (url_hash, verdict, date) VALUES (?, ?, ?)",
+            (url_hash, verdict, datetime.now().strftime("%Y-%m-%d %H:%M")),
+        )
+        conn.commit()
+        conn.close()
+        logger.info("Recorded feedback: %s on %s", verdict, url_hash)
+    except Exception as e:
+        logger.error("Error recording feedback: %s", e)
+
+
+def get_feedback_embeddings() -> list[tuple[str, list[float]]]:
+    """(verdict, embedding) for every reaction whose article has a stored
+    embedding — the training signal for personalized ranking."""
+    try:
+        conn = _get_connection()
+        rows = conn.execute(
+            "SELECT f.verdict, a.embedding FROM feedback f "
+            "JOIN archive a ON a.url_hash = f.url_hash "
+            "WHERE a.embedding IS NOT NULL"
+        ).fetchall()
+        conn.close()
+        return [(verdict, json.loads(emb)) for verdict, emb in rows]
+    except Exception as e:
+        logger.error("Error reading feedback embeddings: %s", e)
+        return []
+
+
+# ---- topics (managed from Telegram) ----
+
+def get_topics() -> dict[str, str]:
+    """Active topics {label: query}. Falls back to config defaults if the
+    table is unreadable, so a DB problem can't stop the digest."""
+    try:
+        conn = _get_connection()
+        rows = conn.execute("SELECT label, query FROM topics ORDER BY label").fetchall()
+        conn.close()
+        return dict(rows) if rows else dict(config.TOPICS)
+    except Exception as e:
+        logger.error("Error reading topics: %s", e)
+        return dict(config.TOPICS)
+
+
+def add_topic(label: str, query: str) -> None:
+    conn = _get_connection()
+    conn.execute("INSERT OR REPLACE INTO topics (label, query) VALUES (?, ?)", (label, query))
+    conn.commit()
+    conn.close()
+
+
+def remove_topic(label: str) -> bool:
+    conn = _get_connection()
+    cursor = conn.execute("DELETE FROM topics WHERE label = ?", (label,))
+    conn.commit()
+    conn.close()
+    return cursor.rowcount > 0
+
+
+# ---- stats (/stats) ----
+
+def get_stats() -> dict:
+    """Aggregates over the archive and feedback tables."""
+    month_cutoff = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d %H:%M")
+    try:
+        conn = _get_connection()
+        total = conn.execute("SELECT COUNT(*) FROM archive").fetchone()[0]
+        month = conn.execute(
+            "SELECT COUNT(*) FROM archive WHERE date_sent >= ?", (month_cutoff,)
+        ).fetchone()[0]
+        top_domains = conn.execute(
+            "SELECT domain, COUNT(*) c FROM archive GROUP BY domain ORDER BY c DESC LIMIT 5"
+        ).fetchall()
+        top_topics = conn.execute(
+            "SELECT topic, COUNT(*) c FROM archive GROUP BY topic ORDER BY c DESC LIMIT 5"
+        ).fetchall()
+        ups = conn.execute("SELECT COUNT(*) FROM feedback WHERE verdict='up'").fetchone()[0]
+        downs = conn.execute("SELECT COUNT(*) FROM feedback WHERE verdict='down'").fetchone()[0]
+        conn.close()
+        return {
+            "total": total, "last_30_days": month,
+            "top_domains": top_domains, "top_topics": top_topics,
+            "thumbs_up": ups, "thumbs_down": downs,
+        }
+    except Exception as e:
+        logger.error("Error computing stats: %s", e)
+        return {}
 
 
 def purge_old_seen() -> None:

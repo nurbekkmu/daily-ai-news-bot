@@ -57,6 +57,25 @@ def _get_news_button_markup() -> str:
     return json.dumps(keyboard)
 
 
+def _get_article_markup(article: dict) -> str:
+    """Per-article keyboard: 👍/👎 feedback (drives personalized ranking)
+    plus the refresh button. callback_data caps at 64 bytes, so articles are
+    referenced by a 16-char URL hash that maps back through the archive."""
+    h = seen.url_short_hash(article["url"])
+    keyboard = {
+        "inline_keyboard": [
+            [
+                {"text": "👍", "callback_data": f"fb:up:{h}"},
+                {"text": "👎", "callback_data": f"fb:down:{h}"},
+            ],
+            [
+                {"text": "🔄 Get Latest News", "callback_data": "news_command"},
+            ],
+        ]
+    }
+    return json.dumps(keyboard)
+
+
 def _format_article_message(article: dict, topic: str) -> str:
     """Format a single article as a Telegram message (Markdown)."""
     title = _escape_markdown(article["title"])
@@ -151,9 +170,6 @@ def send_digest(articles_by_topic: dict[str, list[dict]]) -> dict[str, list[dict
     if not config.TELEGRAM_TOKEN or not config.TELEGRAM_CHAT_ID:
         raise RuntimeError("TELEGRAM_TOKEN / TELEGRAM_CHAT_ID not set (check .env / GitHub secrets).")
 
-    # Get button markup to attach to each message
-    button_markup = _get_news_button_markup()
-
     total_skipped = 0
 
     # Filter out articles flagged as unreliable or that failed to summarize
@@ -187,7 +203,7 @@ def send_digest(articles_by_topic: dict[str, list[dict]]) -> dict[str, list[dict
         for article in articles:
             message = _format_article_message(article, topic)
             try:
-                _send_message(message, reply_markup=button_markup)
+                _send_message(message, reply_markup=_get_article_markup(article))
             except Exception as e:  # noqa: BLE001 - one bad article must not kill the digest
                 failed_count += 1
                 logger.error(
