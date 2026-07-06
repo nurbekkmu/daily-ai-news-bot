@@ -84,6 +84,9 @@ def run(auto: bool = False) -> dict:
     the Telegram message alone.
     """
     logger.info("=== AI News Digest: pipeline starting ===")
+    # Config sanity up front: a missing GEMINI_API_KEYS secret fails every
+    # summary with the same red herring; make it obvious in line one.
+    logger.info("Gemini keys configured: %d", len(config.GEMINI_API_KEYS))
     counts = {"search": 0, "rss": 0, "unseen": 0, "deduped": 0, "selected": 0, "sent": 0}
 
     logger.info("Initializing deduplication database")
