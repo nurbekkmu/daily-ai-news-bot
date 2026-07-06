@@ -1,7 +1,7 @@
 """
 Sends each article as an individual Telegram message: title + summary + source link + hashtags.
 Includes delays between sends to avoid rate limiting.
-Attaches an inline button for on-demand news refresh.
+Attaches 👍/👎 feedback buttons that drive personalized ranking.
 Marks each article as seen immediately after a successful send, so a crash
 mid-digest never causes already-delivered articles to be resent.
 """
@@ -42,34 +42,20 @@ def _escape_markdown(text: str) -> str:
     return text
 
 
-def _get_news_button_markup() -> str:
-    """Return JSON markup for inline keyboard with 'Get Latest News' button."""
-    keyboard = {
-        "inline_keyboard": [
-            [
-                {
-                    "text": "🔄 Get Latest News",
-                    "callback_data": "news_command",
-                }
-            ]
-        ]
-    }
-    return json.dumps(keyboard)
-
-
 def _get_article_markup(article: dict) -> str:
-    """Per-article keyboard: 👍/👎 feedback (drives personalized ranking)
-    plus the refresh button. callback_data caps at 64 bytes, so articles are
-    referenced by a 16-char URL hash that maps back through the archive."""
+    """Per-article keyboard: just 👍/👎 feedback (drives personalized
+    ranking). callback_data caps at 64 bytes, so articles are referenced by
+    a 16-char URL hash that maps back through the archive.
+
+    There used to be a 'Get Latest News' refresh button on every message,
+    but auto-push and the registered command menu made it clutter; the
+    news_command callback handler stays for taps on old messages."""
     h = seen.url_short_hash(article["url"])
     keyboard = {
         "inline_keyboard": [
             [
                 {"text": "👍", "callback_data": f"fb:up:{h}"},
                 {"text": "👎", "callback_data": f"fb:down:{h}"},
-            ],
-            [
-                {"text": "🔄 Get Latest News", "callback_data": "news_command"},
             ],
         ]
     }
@@ -152,11 +138,11 @@ def _send_message(text: str, reply_markup: str = None) -> None:
 
 
 def send_notice(text: str) -> None:
-    """Send a short service message (keeps the refresh button attached).
-    Used so an on-demand request always gets SOME reply — silence after a
-    button tap is indistinguishable from the bot being broken."""
+    """Send a short service message. Used so an on-demand request always
+    gets SOME reply — silence after a command is indistinguishable from
+    the bot being broken."""
     try:
-        _send_message(text, reply_markup=_get_news_button_markup())
+        _send_message(text)
     except Exception as e:  # noqa: BLE001 - a notice is best-effort
         logger.error("Failed to send notice: %s", _redact(str(e)))
 

@@ -111,6 +111,17 @@ def test_archive_article_roundtrip(tmp_path, monkeypatch):
 
 # ---- telegram_sender._escape_markdown ----
 
+def test_article_markup_is_feedback_only():
+    import json
+    markup = json.loads(telegram_sender._get_article_markup(
+        {"url": "https://example.com/story"}
+    ))
+    rows = markup["inline_keyboard"]
+    assert len(rows) == 1  # no refresh button row
+    assert [b["text"] for b in rows[0]] == ["👍", "👎"]
+    assert all(b["callback_data"].startswith("fb:") for b in rows[0])
+
+
 def test_escape_markdown_escapes_specials():
     assert telegram_sender._escape_markdown("a_b*c`d[e") == r"a\_b\*c\`d\[e"
 

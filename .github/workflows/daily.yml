@@ -1,8 +1,8 @@
 name: AI News Digest (manual only)
 
-# On-demand-only mode: no daily cron. News is delivered when you press the
-# "Get Latest News" button or send /news (handled by poll.yml every 5 minutes).
-# This workflow remains as a manual fallback via the Actions tab "Run workflow".
+# No cron here: delivery happens via poll.yml (auto-push every 15 minutes
+# plus /news commands). This workflow remains as a manual fallback via the
+# Actions tab "Run workflow" button.
 on:
   workflow_dispatch: {}
 
