@@ -54,9 +54,17 @@ def select_top_per_topic(articles: list[dict]) -> dict[str, list[dict]]:
     return selected
 
 
-def run() -> bool:
-    """Run the full digest pipeline. Returns True if any articles were sent."""
+def run() -> dict:
+    """Run the full digest pipeline.
+
+    Returns {"outcome": ..., "counts": {...}} where outcome is one of
+    "sent", "no_candidates", "all_seen", "nothing_sent" — so callers can
+    tell the user WHY a run produced nothing instead of guessing. The
+    counts trace every stage: a run that ends empty is diagnosable from
+    the Telegram message alone.
+    """
     logger.info("=== AI News Digest: pipeline starting ===")
+    counts = {"search": 0, "rss": 0, "unseen": 0, "deduped": 0, "selected": 0, "sent": 0}
 
     logger.info("Initializing deduplication database")
     seen.init_db()
@@ -68,23 +76,27 @@ def run() -> bool:
     logger.info("Step 1/5: gathering candidates (%d search topics + %d RSS feeds)",
                 len(topics), len(config.RSS_FEEDS))
     candidates = search.gather_candidates(topics)
+    counts["search"] = len(candidates)
     known_urls = {c["url"] for c in candidates}
     for c in rss.gather_candidates():
         if c["url"] not in known_urls:
             known_urls.add(c["url"])
             candidates.append(c)
+            counts["rss"] += 1
     if not candidates:
-        logger.error("No search candidates found — aborting run (nothing to send).")
-        return False
+        logger.error("No candidates from search OR feeds — likely blocked/stale sources.")
+        return {"outcome": "no_candidates", "counts": counts}
 
     logger.info("Step 2/5: dropping already-sent articles")
     candidates = seen.filter_articles(candidates)
+    counts["unseen"] = len(candidates)
     if not candidates:
         logger.warning("All articles have been seen before — nothing new to send.")
-        return False
+        return {"outcome": "all_seen", "counts": counts}
 
     logger.info("Step 3/5: semantic dedup on %d candidates", len(candidates))
     candidates = semantic.dedupe(candidates)
+    counts["deduped"] = len(candidates)
 
     logger.info("Ranking with feedback history")
     personalize.attach_scores(candidates)
@@ -94,18 +106,16 @@ def run() -> bool:
 
     logger.info("Selecting top %d articles per topic", config.ITEMS_PER_TOPIC)
     selected_by_topic = select_top_per_topic(enriched)
-    total_selected = sum(len(v) for v in selected_by_topic.values())
-    logger.info("Selected %d articles total", total_selected)
-
-    if total_selected == 0:
-        logger.error("No articles survived selection — aborting run.")
-        return False
+    counts["selected"] = sum(len(v) for v in selected_by_topic.values())
+    logger.info("Selected %d articles total", counts["selected"])
 
     logger.info("Step 5/5: summarizing with Gemini and sending to Telegram")
     for topic, items in selected_by_topic.items():
         selected_by_topic[topic] = summarize.summarize_all(items)
 
     actually_sent = telegram_sender.send_digest(selected_by_topic)
+    counts["sent"] = sum(len(v) for v in actually_sent.values())
 
-    logger.info("=== Pipeline complete: digest sent and state persisted ===")
-    return bool(actually_sent)
+    logger.info("=== Pipeline complete: %s ===", counts)
+    outcome = "sent" if counts["sent"] else "nothing_sent"
+    return {"outcome": outcome, "counts": counts}

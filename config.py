@@ -27,7 +27,12 @@ TOPICS = {
 RSS_FEEDS = {
     "https://huggingface.co/blog/feed.xml":                                    "Labs",
     "https://deepmind.google/blog/rss.xml":                                    "Labs",
+    "https://blog.google/technology/ai/rss/":                                  "Labs",
     "https://www.technologyreview.com/topic/artificial-intelligence/feed":     "AI",
+    "https://techcrunch.com/category/artificial-intelligence/feed/":           "AI",
+    "https://venturebeat.com/category/ai/feed/":                               "AI",
+    "https://www.theverge.com/rss/ai-artificial-intelligence/index.xml":       "AI",
+    # arXiv skips weekends (skipDays Sat/Sun) — empty feeds then are normal
     "https://rss.arxiv.org/rss/cs.CL":                                         "Research",
     "https://rss.arxiv.org/rss/cs.LG":                                         "Research",
 }

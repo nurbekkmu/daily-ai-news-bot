@@ -98,15 +98,29 @@ def _answer_callback_query(callback_query_id: str, text: str) -> None:
 
 
 def run_news() -> None:
-    """Run the digest pipeline; always reply with something."""
-    sent = pipeline.run()
-    if not sent:
-        # The request was heard but there's nothing to deliver — say so,
-        # otherwise a button tap that finds no news looks like a dead bot.
-        telegram_sender.send_notice(
-            "Nothing new since the last digest — all current articles were "
-            "already sent. Try again in a few hours."
-        )
+    """Run the digest pipeline; always reply with something — and when the
+    run produced nothing, say WHY, with the stage counts, so a failure is
+    diagnosable straight from the phone."""
+    result = pipeline.run()
+    if result["outcome"] == "sent":
+        return
+
+    c = result["counts"]
+    trace = (f"\n\n(search {c['search']}, feeds {c['rss']}, new {c['unseen']}, "
+             f"after dedup {c['deduped']}, selected {c['selected']}, delivered {c['sent']})")
+
+    reasons = {
+        "no_candidates":
+            "Found no articles at all — the search backend is probably "
+            "blocking this runner and the feeds had nothing fresh.",
+        "all_seen":
+            "Nothing new since the last digest — everything found right now "
+            "was already sent. Try again in a few hours.",
+        "nothing_sent":
+            "Found new articles, but none survived summarizing/sending — "
+            "check the Actions log for this run.",
+    }
+    telegram_sender.send_notice(reasons[result["outcome"]] + trace)
 
 
 def handle_stats() -> None:
