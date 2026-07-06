@@ -135,6 +135,26 @@ TELEGRAM_MAX_MESSAGE_LEN = 4096
 MAX_RETRIES = 3
 RETRY_BACKOFF_SECONDS = 5
 
+# ---- Automatic push ----
+# The 5-minute poll piggybacks an automatic digest check: when one is due,
+# new articles are pushed without anyone pressing /news. Empty checks stay
+# SILENT (unlike /news, which always answers).
+#
+# 15 minutes is the max sane frequency, chosen from the quota math:
+# ~64 checks/day in the waking window x (1 embedding batch + summaries for
+# genuinely-new articles only, each story summarized exactly once) stays
+# around 10% of the free tier across the configured keys. Checking more
+# often mostly re-embeds the same unsent candidates and provokes DDG's
+# rate limiting for near-zero freshness gain.
+AUTO_PUSH_DEFAULT = True       # runtime toggle: /auto on|off in Telegram
+AUTO_INTERVAL_MINUTES = 15
+AUTO_MAX_ARTICLES = 6          # cap per auto-push; /news remains uncapped
+# Quiet hours in Tashkent time (UTC+5, no DST): no pushes 23:00-07:00.
+# Overnight news accumulates and arrives as a morning briefing.
+AUTO_TZ_UTC_OFFSET = 5
+AUTO_QUIET_START_HOUR = 23
+AUTO_QUIET_END_HOUR = 7
+
 # ---- Deduplication ----
 SEEN_RETENTION_DAYS = 30  # keep dedup records for 30 days, then purge old entries
 

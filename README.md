@@ -1,11 +1,12 @@
 # daily-ai-news-bot
 
 A Telegram bot that fetches, filters, deduplicates and summarizes AI/ML news
-on demand — running entirely on GitHub Actions. No server, no hosting bill.
+— running entirely on GitHub Actions. No server, no hosting bill.
 
-Send `/news` (or tap the button under any digest message) and a few minutes
-later you get fresh articles, two per topic, each as its own message with
-👍/👎 buttons that teach the bot your taste:
+New stories are pushed automatically as they appear (checked every 15
+minutes, quiet at night so overnight news arrives as a morning briefing),
+and `/news` fetches on demand at any moment. Every article is its own
+message with 👍/👎 buttons that teach the bot your taste:
 
 > **AI**
 > **DeepMind's new model solves protein interactions**
@@ -25,10 +26,20 @@ All commands (owner-only):
 | Command | What it does |
 |---|---|
 | `/news` | run the digest pipeline now |
+| `/auto` | auto-push status; `/auto on`, `/auto off` |
 | `/weekly` | synthesized roundup of the last 7 days, from the archive |
 | `/stats` | delivery counts, top sources, feedback tally |
 | `/topics` | list / `add <name>` / `remove <name>` search topics |
 | 👍 / 👎 | feedback that personalizes future ranking |
+
+Auto-push piggybacks on the 5-minute poll: when a check is due (every 15
+min — the max sane frequency from the Gemini free-tier quota math, since
+each story is embedded and summarized exactly once), new articles are
+delivered without being asked. Two deliberate differences from `/news`:
+empty checks stay **silent** (a channel that says "nothing happened" every
+15 minutes trains you to mute it), and pushes are capped at the best 6
+articles (trusted sources first, then your feedback preference). Quiet
+hours 23:00–07:00 Tashkent time.
 
 ## How it works
 

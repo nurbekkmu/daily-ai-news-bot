@@ -26,6 +26,8 @@ load_dotenv()
 import json
 import logging
 import os
+import time
+from datetime import datetime, timezone
 
 import requests
 
@@ -49,10 +51,30 @@ HELP_TEXT = (
     "  /news — get the latest digest\n"
     "  /weekly — roundup of the last 7 days\n"
     "  /stats — delivery and feedback statistics\n"
-    "  /topics — list topics; /topics add <name>, /topics remove <name>\n\n"
+    "  /topics — list topics; /topics add <name>, /topics remove <name>\n"
+    "  /auto — auto-push status; /auto on, /auto off\n\n"
     "Replies can take a few minutes — the bot checks for commands every "
     "5 minutes."
 )
+
+
+def _is_quiet_hour(utc_hour: int) -> bool:
+    """True during configured quiet hours (local time via fixed UTC offset —
+    Tashkent has no DST, so zoneinfo would be overkill)."""
+    local = (utc_hour + config.AUTO_TZ_UTC_OFFSET) % 24
+    start, end = config.AUTO_QUIET_START_HOUR, config.AUTO_QUIET_END_HOUR
+    if start <= end:
+        return start <= local < end
+    return local >= start or local < end  # window wraps midnight
+
+
+def _auto_enabled() -> bool:
+    default = "1" if config.AUTO_PUSH_DEFAULT else "0"
+    return seen.get_state("auto_enabled", default) == "1"
+
+
+def _auto_due(now_ts: float, last_ts: float) -> bool:
+    return now_ts - last_ts >= config.AUTO_INTERVAL_MINUTES * 60
 
 
 def _get_updates(offset: int = None) -> list[dict]:
@@ -141,6 +163,30 @@ def handle_stats() -> None:
     telegram_sender.send_notice("\n".join(lines))
 
 
+def handle_auto_command(text: str) -> None:
+    """Parse and execute '/auto', '/auto on', '/auto off'."""
+    parts = text.split(maxsplit=1)
+    arg = parts[1].strip().lower() if len(parts) > 1 else ""
+
+    if arg == "on":
+        seen.set_state("auto_enabled", "1")
+        telegram_sender.send_notice(
+            f"Auto-push ON — checking every {config.AUTO_INTERVAL_MINUTES} min, "
+            f"quiet {config.AUTO_QUIET_START_HOUR}:00–{config.AUTO_QUIET_END_HOUR}:00 "
+            "Tashkent time."
+        )
+    elif arg == "off":
+        seen.set_state("auto_enabled", "0")
+        telegram_sender.send_notice("Auto-push OFF — news only on /news.")
+    else:
+        state = "ON" if _auto_enabled() else "OFF"
+        telegram_sender.send_notice(
+            f"Auto-push is {state} (every {config.AUTO_INTERVAL_MINUTES} min, "
+            f"quiet {config.AUTO_QUIET_START_HOUR}:00–{config.AUTO_QUIET_END_HOUR}:00 "
+            "Tashkent). Use /auto on or /auto off."
+        )
+
+
 def handle_topics_command(text: str) -> None:
     """Parse and execute '/topics', '/topics add X', '/topics remove X'."""
     parts = text.split(maxsplit=2)
@@ -208,7 +254,8 @@ def poll():
                 continue
             if text == "/news":
                 news_requested = True
-            elif text in ("/weekly", "/stats") or text.startswith("/topics"):
+            elif (text in ("/weekly", "/stats")
+                  or text.startswith("/topics") or text.startswith("/auto")):
                 commands.append(text)
             else:
                 # Typos happen (/new, /nwes...). Never ignore the owner
@@ -247,6 +294,8 @@ def poll():
             handle_stats()
         elif command.startswith("/topics"):
             handle_topics_command(command)
+        elif command.startswith("/auto"):
+            handle_auto_command(command)
         elif command == "/help" and not help_sent:
             telegram_sender.send_notice(HELP_TEXT)
             help_sent = True
@@ -254,6 +303,31 @@ def poll():
     # The pipeline runs at most once per poll no matter how many taps queued up
     if news_requested:
         run_news()
+        seen.set_state("last_auto_ts", str(int(time.time())))
+
+
+def auto_check() -> None:
+    """Scheduled push: when due (and outside quiet hours), run the pipeline
+    and deliver whatever is new. Empty outcomes stay SILENT — a push channel
+    that says 'nothing happened' every 15 minutes trains you to mute it."""
+    if not _auto_enabled():
+        return
+    if _is_quiet_hour(datetime.now(timezone.utc).hour):
+        logger.info("Auto-push: quiet hours, skipping.")
+        return
+    try:
+        last_ts = float(seen.get_state("last_auto_ts", "0"))
+    except ValueError:
+        last_ts = 0.0
+    if not _auto_due(time.time(), last_ts):
+        return
+
+    # Mark the attempt BEFORE running (same crash-safety idea as update_id:
+    # a crashing pipeline must not retry on every 5-minute poll)
+    seen.set_state("last_auto_ts", str(int(time.time())))
+    logger.info("Auto-push: check is due, running pipeline.")
+    result = pipeline.run(auto=True)
+    logger.info("Auto-push outcome: %s %s", result["outcome"], result["counts"])
 
 
 def handle_dispatch() -> None:
@@ -286,3 +360,4 @@ if __name__ == "__main__":
         handle_dispatch()
     else:
         poll()
+        auto_check()

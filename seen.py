@@ -341,33 +341,41 @@ def filter_articles(articles: list[dict]) -> list[dict]:
     return filtered
 
 
-def get_last_telegram_update_id() -> int:
-    """Retrieve the last processed Telegram update_id from the database."""
+def get_state(key: str, default: str = "") -> str:
+    """Read a value from the generic state table (update ids, auto-push
+    toggle, last auto-run timestamp...)."""
     try:
         conn = _get_connection()
-        cursor = conn.cursor()
-        cursor.execute("SELECT value FROM telegram_state WHERE key = ?", ("last_update_id",))
-        result = cursor.fetchone()
+        row = conn.execute(
+            "SELECT value FROM telegram_state WHERE key = ?", (key,)
+        ).fetchone()
         conn.close()
-        if result:
-            return int(result[0])
-        return 0
+        return row[0] if row else default
     except Exception as e:
-        logger.error("Error retrieving last Telegram update_id: %s", e)
-        return 0
+        logger.error("Error reading state %s: %s", key, e)
+        return default
 
 
-def set_last_telegram_update_id(update_id: int) -> None:
-    """Store the last processed Telegram update_id in the database."""
+def set_state(key: str, value: str) -> None:
     try:
         conn = _get_connection()
-        cursor = conn.cursor()
-        cursor.execute(
+        conn.execute(
             "INSERT OR REPLACE INTO telegram_state (key, value) VALUES (?, ?)",
-            ("last_update_id", str(update_id)),
+            (key, str(value)),
         )
         conn.commit()
         conn.close()
     except Exception as e:
-        logger.error("Error storing last Telegram update_id: %s", e)
+        logger.error("Error storing state %s: %s", key, e)
+
+
+def get_last_telegram_update_id() -> int:
+    try:
+        return int(get_state("last_update_id", "0"))
+    except ValueError:
+        return 0
+
+
+def set_last_telegram_update_id(update_id: int) -> None:
+    set_state("last_update_id", str(update_id))
 

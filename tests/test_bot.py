@@ -287,6 +287,52 @@ def test_topics_lifecycle(tmp_path, monkeypatch):
     assert "Robotics" not in seen.get_topics()
 
 
+def test_state_kv_roundtrip(tmp_path, monkeypatch):
+    monkeypatch.setattr(seen, "DB_PATH", str(tmp_path / "t.db"))
+    seen.init_db()
+    assert seen.get_state("missing", "fallback") == "fallback"
+    seen.set_state("auto_enabled", "0")
+    assert seen.get_state("auto_enabled", "1") == "0"
+
+
+# ---- auto-push scheduling ----
+
+def test_quiet_hours_tashkent_window():
+    import poll_telegram
+    # Quiet 23:00-07:00 UTC+5  ->  18:00-02:00 UTC
+    assert poll_telegram._is_quiet_hour(18)      # 23:00 Tashkent
+    assert poll_telegram._is_quiet_hour(1)       # 06:00 Tashkent
+    assert not poll_telegram._is_quiet_hour(2)   # 07:00 Tashkent — morning briefing
+    assert not poll_telegram._is_quiet_hour(12)  # 17:00 Tashkent
+
+
+def test_auto_due_threshold():
+    import poll_telegram
+    interval = config.AUTO_INTERVAL_MINUTES * 60
+    assert poll_telegram._auto_due(1000.0 + interval, 1000.0)
+    assert not poll_telegram._auto_due(1000.0 + interval - 1, 1000.0)
+
+
+def test_cap_for_auto_keeps_best_across_topics():
+    def art(domain, pref):
+        return {"domain": domain, "_pref": pref, "content_source": "scraped"}
+
+    selected = {
+        "AI": [art("reuters.com", 0.1), art("random.net", 0.9)],
+        "ML": [art("nature.com", 0.5), art("blog.example", 0.0)],
+    }
+    capped = pipeline.cap_for_auto(selected, limit=2)
+    flat = [a for items in capped.values() for a in items]
+    assert len(flat) == 2
+    # Both trusted articles win over untrusted, regardless of _pref
+    assert {a["domain"] for a in flat} == {"reuters.com", "nature.com"}
+
+
+def test_cap_for_auto_no_cap_needed():
+    selected = {"AI": [{"domain": "reuters.com", "_pref": 0.0}]}
+    assert pipeline.cap_for_auto(selected, limit=6) == selected
+
+
 def test_feedback_and_stats(tmp_path, monkeypatch):
     monkeypatch.setattr(seen, "DB_PATH", str(tmp_path / "t.db"))
     seen.init_db()

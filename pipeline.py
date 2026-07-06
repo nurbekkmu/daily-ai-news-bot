@@ -54,8 +54,28 @@ def select_top_per_topic(articles: list[dict]) -> dict[str, list[dict]]:
     return selected
 
 
-def run() -> dict:
+def cap_for_auto(selected_by_topic: dict[str, list[dict]], limit: int) -> dict[str, list[dict]]:
+    """Auto-pushes are capped so a busy news morning can't dump a dozen
+    messages at once: keep the best `limit` articles across all topics
+    (trusted outlets first, then feedback preference)."""
+    flat = [(topic, a) for topic, items in selected_by_topic.items() for a in items]
+    if len(flat) <= limit:
+        return selected_by_topic
+    flat.sort(key=lambda ta: (
+        0 if config.domain_matches(ta[1]["domain"], config.TRUSTED_DOMAINS) else 1,
+        -ta[1].get("_pref", 0.0),
+    ))
+    capped: dict[str, list[dict]] = {}
+    for topic, article in flat[:limit]:
+        capped.setdefault(topic, []).append(article)
+    return capped
+
+
+def run(auto: bool = False) -> dict:
     """Run the full digest pipeline.
+
+    auto=True is the scheduled push mode: article count is capped at
+    config.AUTO_MAX_ARTICLES (best sources/preference first).
 
     Returns {"outcome": ..., "counts": {...}} where outcome is one of
     "sent", "no_candidates", "all_seen", "nothing_sent" — so callers can
@@ -106,6 +126,8 @@ def run() -> dict:
 
     logger.info("Selecting top %d articles per topic", config.ITEMS_PER_TOPIC)
     selected_by_topic = select_top_per_topic(enriched)
+    if auto:
+        selected_by_topic = cap_for_auto(selected_by_topic, config.AUTO_MAX_ARTICLES)
     counts["selected"] = sum(len(v) for v in selected_by_topic.values())
     logger.info("Selected %d articles total", counts["selected"])
 
