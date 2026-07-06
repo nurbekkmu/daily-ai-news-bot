@@ -4,8 +4,8 @@ A Telegram bot that fetches, filters, deduplicates and summarizes AI/ML news
 on demand — running entirely on GitHub Actions. No server, no hosting bill.
 
 Send `/news` (or tap the button under any digest message) and a few minutes
-later you get up to 8 fresh articles, two per topic (AI, ML, deep learning,
-LLMs), each as its own message:
+later you get fresh articles, two per topic, each as its own message with
+👍/👎 buttons that teach the bot your taste:
 
 > **AI**
 > **DeepMind's new model solves protein interactions**
@@ -20,27 +20,42 @@ LLMs), each as its own message:
 >
 > [Read more](…)
 
+All commands (owner-only):
+
+| Command | What it does |
+|---|---|
+| `/news` | run the digest pipeline now |
+| `/weekly` | synthesized roundup of the last 7 days, from the archive |
+| `/stats` | delivery counts, top sources, feedback tally |
+| `/topics` | list / `add <name>` / `remove <name>` search topics |
+| 👍 / 👎 | feedback that personalizes future ranking |
+
 ## How it works
 
 ```
 /news in Telegram
-      │   (GitHub Actions cron polls getUpdates every 5 min)
+      │   (GitHub Actions cron polls getUpdates every 5 min,
+      │    or instantly via the optional webhook — see webhook/)
       ▼
-search    DuckDuckGo news index, one query per topic, last 24h only
+gather      DuckDuckGo news index (one query per topic, last 24h)
+            + RSS feeds (arXiv, lab blogs) for primary sources
       ▼
-filter    blocklist (Wikipedia/Medium/Reddit/...) → already-sent URLs dropped
+filter      blocklist (Wikipedia/Medium/Reddit/...) → already-sent URLs dropped
       ▼
-dedup     semantic: Gemini embeddings + cosine similarity catch the same
-          story from different outlets; the trusted outlet wins
+dedup       semantic: Gemini embeddings + cosine similarity catch the same
+            story from different outlets; the trusted outlet wins
       ▼
-scrape    full article text in parallel; snippet fallback when a site blocks
+personalize score candidates against the 👍/👎 embedding centroids —
+            liked-similar stories rank up, disliked-similar rank down
       ▼
-rank      trusted outlets (Reuters, Nature, arXiv, TechCrunch, ...) first
+scrape      full article text in parallel; snippet fallback when a site blocks
       ▼
-summarize Gemini 2.5 Flash — also a quality gate: replies SKIP for SEO junk,
-          homepages, and off-topic pages, which are then dropped
+rank        trusted outlets first, then preference score
       ▼
-send      individual Telegram messages, marked as seen one by one
+summarize   Gemini 2.5 Flash — also a quality gate: replies SKIP for SEO junk,
+            homepages, and off-topic pages, which are then dropped
+      ▼
+send        individual Telegram messages, marked as seen one by one
 ```
 
 State lives in a SQLite file (`seen.db`) that the workflow commits back to
@@ -63,6 +78,26 @@ Two layers of dedup:
   by cosine similarity, so Reuters and TechCrunch covering the same
   announcement produce one message, not two. Fails open: if the embedding
   call errors, the digest still goes out.
+
+## Measured, not vibes
+
+The AI components are evaluated, not assumed to work (`evals/`):
+
+- **Semantic dedup** (`eval_dedup.py`): on a labeled set of same-story
+  paraphrases vs. hard negatives (same company, different event), the
+  threshold sweep showed different-story pairs scoring below 0.75 and
+  same-story paraphrases at 0.78+. The configured threshold (0.78) scores
+  **1.00 precision / 1.00 recall** on that set — and it was moved from an
+  initial guess of 0.80 *because* the eval showed two missed duplicates.
+- **SKIP quality gate** (`eval_skip_gate.py`): **16/16 (100%)** on labeled
+  cases — real news vs. tutorials, homepages, listicles, and off-topic
+  articles the digest must reject.
+- **Summary faithfulness** (`eval_faithfulness.py`): LLM-as-judge that
+  re-scrapes delivered articles and checks the summary for unsupported
+  claims. Runs against the live archive as it grows.
+
+The datasets are small and hand-labeled — the point is that every prompt or
+threshold change can be re-checked in seconds with `python evals/eval_*.py`.
 
 ## Design decisions
 
@@ -119,19 +154,24 @@ workflows, and a manual push can conflict with theirs.
 ## Repository layout
 
 ```
-├── pipeline.py           the digest pipeline (search → dedup → scrape → summarize → send)
+├── pipeline.py           the digest pipeline (gather → dedup → personalize → summarize → send)
 ├── main.py               entry point for manual runs
-├── poll_telegram.py      on-demand trigger: polls for /news, runs pipeline
+├── poll_telegram.py      command router: /news /weekly /stats /topics + 👍/👎
 ├── search.py             DuckDuckGo queries + domain blocklist
+├── rss.py                RSS/Atom primary sources (stdlib parser, no deps)
 ├── semantic.py           embedding-based same-story dedup
+├── personalize.py        feedback-centroid ranking
 ├── scrape.py             parallel article fetching with snippet fallback
 ├── summarize.py          Gemini summaries + SKIP quality gate
+├── roundup.py            /weekly synthesis from the archive
 ├── telegram_sender.py    message formatting, sending, crash-safe seen-marking
-├── seen.py               SQLite dedup state + URL normalization
+├── seen.py               SQLite state: dedup, archive, feedback, topics
 ├── gemini.py             shared Gemini client with API-key rotation
-├── config.py             topics, domains, thresholds, prompt
+├── config.py             topics, feeds, domains, thresholds, prompts
+├── evals/                measured accuracy of the AI parts (see above)
 ├── tests/                unit tests for the pure logic (pytest)
-└── .github/workflows     poll (5-min cron), manual run, tests, keep-alive
+├── webhook/              optional Cloudflare Worker for instant triggers
+└── .github/workflows     poll (5-min cron + dispatch), manual run, tests, keep-alive
 ```
 
 ## Configuration

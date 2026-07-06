@@ -13,7 +13,9 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import config
+import personalize
 import pipeline
+import rss
 import scrape
 import seen
 import semantic
@@ -203,3 +205,100 @@ def test_semantic_dedupe_fails_open(monkeypatch):
     monkeypatch.setattr(config, "SEMANTIC_DEDUP_ENABLED", True)
 
     assert semantic.dedupe(candidates) == candidates
+
+
+# ---- RSS parsing ----
+
+_RSS_SAMPLE = """<?xml version="1.0"?>
+<rss version="2.0"><channel><title>Feed</title>
+<item><title>Story one</title><link>https://ex.com/1</link>
+<description>&lt;p&gt;Some &lt;b&gt;html&lt;/b&gt; text&lt;/p&gt;</description>
+<pubDate>Mon, 06 Jul 2026 08:00:00 GMT</pubDate></item>
+<item><title></title><link>https://ex.com/skipme</link></item>
+</channel></rss>"""
+
+_ATOM_SAMPLE = """<?xml version="1.0"?>
+<feed xmlns="http://www.w3.org/2005/Atom"><title>Feed</title>
+<entry><title>Atom story</title>
+<link rel="alternate" href="https://ex.com/atom1"/>
+<summary>Atom snippet</summary>
+<published>2026-07-06T08:00:00Z</published></entry>
+</feed>"""
+
+
+def test_parse_feed_rss():
+    entries = rss.parse_feed(_RSS_SAMPLE)
+    assert len(entries) == 1  # titleless entry dropped
+    assert entries[0]["title"] == "Story one"
+    assert entries[0]["url"] == "https://ex.com/1"
+    assert entries[0]["snippet"] == "Some html text"
+
+
+def test_parse_feed_atom():
+    entries = rss.parse_feed(_ATOM_SAMPLE)
+    assert entries == [{
+        "title": "Atom story", "url": "https://ex.com/atom1",
+        "snippet": "Atom snippet", "published": "2026-07-06T08:00:00Z",
+    }]
+
+
+def test_is_recent_handles_unparseable_and_old():
+    assert rss._is_recent("not a date")          # unknown dates pass through
+    assert not rss._is_recent("Mon, 01 Jan 2001 00:00:00 GMT")
+
+
+# ---- personalization ----
+
+def test_attach_scores_no_feedback_is_neutral(monkeypatch):
+    monkeypatch.setattr(personalize.seen, "get_feedback_embeddings", lambda: [])
+    candidates = [_candidate("AI", "a.com", "scraped", "x")]
+    personalize.attach_scores(candidates)
+    assert candidates[0]["_pref"] == 0.0
+
+
+def test_attach_scores_prefers_liked_direction(monkeypatch):
+    monkeypatch.setattr(config, "PERSONALIZATION_ENABLED", True)
+    monkeypatch.setattr(
+        personalize.seen, "get_feedback_embeddings",
+        lambda: [("up", [1.0, 0.0]), ("down", [0.0, 1.0])],
+    )
+    liked_like = _candidate("AI", "a.com", "scraped", "liked")
+    liked_like["_embedding"] = [0.9, 0.1]
+    disliked_like = _candidate("AI", "b.com", "scraped", "disliked")
+    disliked_like["_embedding"] = [0.1, 0.9]
+    no_embedding = _candidate("AI", "c.com", "scraped", "none")
+
+    personalize.attach_scores([liked_like, disliked_like, no_embedding])
+    assert liked_like["_pref"] > 0 > disliked_like["_pref"]
+    assert no_embedding["_pref"] == 0.0
+
+
+# ---- topics / feedback / stats storage ----
+
+def test_topics_lifecycle(tmp_path, monkeypatch):
+    monkeypatch.setattr(seen, "DB_PATH", str(tmp_path / "t.db"))
+    seen.init_db()
+    assert seen.get_topics() == config.TOPICS  # seeded from defaults
+
+    seen.add_topic("Robotics", "robotics")
+    assert seen.get_topics()["Robotics"] == "robotics"
+    assert seen.remove_topic("Robotics") is True
+    assert seen.remove_topic("Robotics") is False
+    assert "Robotics" not in seen.get_topics()
+
+
+def test_feedback_and_stats(tmp_path, monkeypatch):
+    monkeypatch.setattr(seen, "DB_PATH", str(tmp_path / "t.db"))
+    seen.init_db()
+    article = {"title": "T", "domain": "reuters.com", "url": "https://r.com/a",
+               "summary": "S", "hashtags": ["#AI"], "_embedding": [0.5, 0.5]}
+    seen.archive_article(article, topic="AI")
+    seen.record_feedback(seen.url_short_hash("https://r.com/a"), "up")
+
+    rows = seen.get_feedback_embeddings()
+    assert rows == [("up", [0.5, 0.5])]
+
+    stats = seen.get_stats()
+    assert stats["total"] == 1
+    assert stats["thumbs_up"] == 1
+    assert stats["top_domains"][0][0] == "reuters.com"
