@@ -85,7 +85,9 @@ MIN_ARTICLE_CHARS = 400        # below this, treat scrape as failed -> use snipp
 MAX_ARTICLE_CHARS = 8000       # truncate very long articles before sending to Gemini
 
 # ---- Gemini ----
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")   # fast + generous free tier; override via env
+# gemini-2.5-flash free tier was cut to 20 requests/day/key (mid-2026);
+# 3.1-flash-lite is newer, suited to summarization, and has its own quota pool
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.1-flash-lite")
 
 # One or more Gemini API keys. Free-tier rate limits are per Google Cloud
 # project, so provide several keys (comma-separated in GEMINI_API_KEYS, each
