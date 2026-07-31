@@ -54,6 +54,10 @@ BLOCKED_DOMAINS = {
     "quora.com", "pinterest.com", "feedspot.com", "blogspot.com",
     "news.google.com", "github.com", "github.io", "slideshare.net",
     "coursera.org", "udemy.com", "tiktok.com",
+    # Aggregators that render articles with JS: every scrape returns 0 chars,
+    # so they reach the summarizer as a bare search snippet and burn a Gemini
+    # call to produce a summary of one sentence — or a SKIP.
+    "msn.com",
 }
 
 # Established outlets get priority when selecting which articles to keep.

@@ -1,11 +1,12 @@
 """
 Poll-based on-demand trigger via Telegram commands/buttons.
 
-TRADEOFF: This uses polling (5-minute intervals) instead of a live webhook
-listener, so there's up to ~5 minutes (in practice 5-20, GitHub cron is not
-punctual) between a command and its response. The upside: no server, stays
-serverless and free on GitHub Actions. For instant delivery there's an
-optional webhook mode — see webhook/README.md — which forwards Telegram
+TRADEOFF: This uses polling instead of a live webhook listener, so a command
+waits for the next scheduled run. The workflow asks for every 5 minutes, but
+that is a request, not a promise: GitHub deprioritizes frequent schedules on
+free runners, and measured cadence on this repo is one run every 1-3 hours.
+The upside: no server, stays serverless and free. For instant delivery there's
+an optional webhook mode — see webhook/README.md — which forwards Telegram
 updates through a Cloudflare Worker to a repository_dispatch event; this
 script then runs in dispatch mode and skips getUpdates entirely.
 
@@ -53,8 +54,9 @@ HELP_TEXT = (
     "  /stats — delivery and feedback statistics\n"
     "  /topics — list topics; /topics add <name>, /topics remove <name>\n"
     "  /auto — auto-push status; /auto on, /auto off\n\n"
-    "Replies can take a few minutes — the bot checks for commands every "
-    "5 minutes."
+    "Replies are not instant. The poller is a GitHub Actions cron: it asks "
+    "for every 5 minutes, but GitHub deprioritizes frequent schedules and "
+    "in practice runs it every 1-3 hours."
 )
 
 
