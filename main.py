@@ -22,4 +22,8 @@ logging.basicConfig(
 
 
 if __name__ == "__main__":
-    pipeline.run()
+    result = pipeline.run()
+    # A missing key never fixes itself — exit non-zero so the workflow goes
+    # red instead of reporting a successful run that delivered nothing.
+    if result["outcome"] == "no_api_key":
+        raise SystemExit(1)

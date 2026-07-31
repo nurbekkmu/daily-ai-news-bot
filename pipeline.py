@@ -78,16 +78,27 @@ def run(auto: bool = False) -> dict:
     config.AUTO_MAX_ARTICLES (best sources/preference first).
 
     Returns {"outcome": ..., "counts": {...}} where outcome is one of
-    "sent", "no_candidates", "all_seen", "nothing_sent" — so callers can
-    tell the user WHY a run produced nothing instead of guessing. The
-    counts trace every stage: a run that ends empty is diagnosable from
-    the Telegram message alone.
+    "sent", "no_api_key", "no_candidates", "all_seen", "summarize_failed",
+    "nothing_sent" — so callers can tell the user WHY a run produced
+    nothing instead of guessing. The counts trace every stage: a run that
+    ends empty is diagnosable from the Telegram message alone.
     """
     logger.info("=== AI News Digest: pipeline starting ===")
     # Config sanity up front: a missing GEMINI_API_KEYS secret fails every
     # summary with the same red herring; make it obvious in line one.
     logger.info("Gemini keys configured: %d", len(config.GEMINI_API_KEYS))
-    counts = {"search": 0, "rss": 0, "unseen": 0, "deduped": 0, "selected": 0, "sent": 0}
+    counts = {"search": 0, "rss": 0, "unseen": 0, "deduped": 0,
+              "selected": 0, "failed": 0, "sent": 0}
+
+    # Stop before spending a runner minute on search and scraping: with no key
+    # every summary fails, so the run can only end empty. This is a broken
+    # configuration, not a quiet news day, and callers must be able to say so.
+    if not config.GEMINI_API_KEYS:
+        logger.error(
+            "No Gemini API key configured — set GEMINI_API_KEYS (.env locally, "
+            "repo secret on GitHub). Nothing can be summarized without it."
+        )
+        return {"outcome": "no_api_key", "counts": counts}
 
     logger.info("Initializing deduplication database")
     seen.init_db()
@@ -139,9 +150,25 @@ def run(auto: bool = False) -> dict:
     for topic, items in selected_by_topic.items():
         selected_by_topic[topic] = summarize.summarize_all(items)
 
+    # A SKIP verdict ('unreliable') is the quality gate working as intended;
+    # only genuine call errors count as failures, because those mean the key
+    # is missing, invalid, or out of quota rather than the article being junk.
+    counts["failed"] = sum(
+        1
+        for items in selected_by_topic.values()
+        for a in items
+        if a.get("summarization_failed") and not a.get("unreliable")
+    )
+
     actually_sent = telegram_sender.send_digest(selected_by_topic)
     counts["sent"] = sum(len(v) for v in actually_sent.values())
 
     logger.info("=== Pipeline complete: %s ===", counts)
-    outcome = "sent" if counts["sent"] else "nothing_sent"
+    if counts["sent"]:
+        outcome = "sent"
+    elif counts["failed"]:
+        # Nothing delivered AND Gemini errored — a broken run, not a quiet one.
+        outcome = "summarize_failed"
+    else:
+        outcome = "nothing_sent"
     return {"outcome": outcome, "counts": counts}

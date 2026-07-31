@@ -119,30 +119,49 @@ def _answer_callback_query(callback_query_id: str, text: str) -> None:
         logger.warning("Error answering callback query: %s", telegram_sender._redact(str(e)))
 
 
-def run_news() -> None:
-    """Run the digest pipeline; always reply with something — and when the
-    run produced nothing, say WHY, with the stage counts, so a failure is
-    diagnosable straight from the phone."""
-    result = pipeline.run()
-    if result["outcome"] == "sent":
-        return
+# Why a run delivered nothing, in the owner's words rather than a stack trace.
+OUTCOME_REASONS = {
+    "no_api_key":
+        "⚠️ No Gemini API key is configured, so nothing can be summarized. "
+        "Set the GEMINI_API_KEYS secret under Settings → Secrets and "
+        "variables → Actions in the repo, then try again.",
+    "no_candidates":
+        "Found no articles at all — the search backend is probably "
+        "blocking this runner and the feeds had nothing fresh.",
+    "all_seen":
+        "Nothing new since the last digest — everything found right now "
+        "was already sent. Try again in a few hours.",
+    "summarize_failed":
+        "⚠️ Found new articles, but every Gemini call failed — the "
+        "GEMINI_API_KEYS secret is most likely missing, invalid, or out of "
+        "quota. Check the Actions log for this run.",
+    "nothing_sent":
+        "Found new articles, but none survived summarizing/sending — "
+        "check the Actions log for this run.",
+}
 
+# Outcomes that mean the BOT is broken rather than the news being quiet.
+# Auto-push is silent by design, which is exactly how a missing API key can
+# go unnoticed for weeks — these get through anyway (throttled to once a day).
+BROKEN_OUTCOMES = ("no_api_key", "summarize_failed")
+
+
+def _describe(result: dict) -> str:
     c = result["counts"]
     trace = (f"\n\n(search {c['search']}, feeds {c['rss']}, new {c['unseen']}, "
-             f"after dedup {c['deduped']}, selected {c['selected']}, delivered {c['sent']})")
+             f"after dedup {c['deduped']}, selected {c['selected']}, "
+             f"failed {c['failed']}, delivered {c['sent']})")
+    return OUTCOME_REASONS[result["outcome"]] + trace
 
-    reasons = {
-        "no_candidates":
-            "Found no articles at all — the search backend is probably "
-            "blocking this runner and the feeds had nothing fresh.",
-        "all_seen":
-            "Nothing new since the last digest — everything found right now "
-            "was already sent. Try again in a few hours.",
-        "nothing_sent":
-            "Found new articles, but none survived summarizing/sending — "
-            "check the Actions log for this run.",
-    }
-    telegram_sender.send_notice(reasons[result["outcome"]] + trace)
+
+def run_news() -> str:
+    """Run the digest pipeline; always reply with something — and when the
+    run produced nothing, say WHY, with the stage counts, so a failure is
+    diagnosable straight from the phone. Returns the outcome."""
+    result = pipeline.run()
+    if result["outcome"] != "sent":
+        telegram_sender.send_notice(_describe(result))
+    return result["outcome"]
 
 
 def handle_stats() -> None:
@@ -220,8 +239,9 @@ def handle_topics_command(text: str) -> None:
         )
 
 
-def poll():
-    """Poll for new Telegram updates and dispatch commands/feedback."""
+def poll() -> str | None:
+    """Poll for new Telegram updates and dispatch commands/feedback.
+    Returns the pipeline outcome if /news ran, else None."""
     logger.info("Polling for new Telegram updates...")
 
     seen.init_db()
@@ -232,7 +252,7 @@ def poll():
     updates = _get_updates(offset=last_update_id + 1 if last_update_id > 0 else None)
     if not updates:
         logger.info("No new updates found.")
-        return
+        return None
 
     logger.info("Found %d new update(s)", len(updates))
 
@@ -310,25 +330,41 @@ def poll():
 
     # The pipeline runs at most once per poll no matter how many taps queued up
     if news_requested:
-        run_news()
+        outcome = run_news()
         seen.set_state("last_auto_ts", str(int(time.time())))
+        return outcome
+    return None
 
 
-def auto_check() -> None:
+def _alert_once_a_day(outcome: str, text: str) -> None:
+    """Send a breakage alert at most once per day per outcome. Auto-push runs
+    every 15 minutes; an unthrottled alert would be its own kind of broken."""
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    stamp = f"{outcome}:{today}"
+    if seen.get_state("last_alert", "") == stamp:
+        logger.info("Auto-push: already alerted about '%s' today.", outcome)
+        return
+    seen.set_state("last_alert", stamp)
+    telegram_sender.send_notice(text)
+
+
+def auto_check() -> str | None:
     """Scheduled push: when due (and outside quiet hours), run the pipeline
     and deliver whatever is new. Empty outcomes stay SILENT — a push channel
-    that says 'nothing happened' every 15 minutes trains you to mute it."""
+    that says 'nothing happened' every 15 minutes trains you to mute it.
+    Outcomes that mean the bot itself is broken DO speak up, once a day.
+    Returns the outcome, or None if no run happened."""
     if not _auto_enabled():
-        return
+        return None
     if _is_quiet_hour(datetime.now(timezone.utc).hour):
         logger.info("Auto-push: quiet hours, skipping.")
-        return
+        return None
     try:
         last_ts = float(seen.get_state("last_auto_ts", "0"))
     except ValueError:
         last_ts = 0.0
     if not _auto_due(time.time(), last_ts):
-        return
+        return None
 
     # Mark the attempt BEFORE running (same crash-safety idea as update_id:
     # a crashing pipeline must not retry on every 5-minute poll)
@@ -336,13 +372,16 @@ def auto_check() -> None:
     logger.info("Auto-push: check is due, running pipeline.")
     result = pipeline.run(auto=True)
     logger.info("Auto-push outcome: %s %s", result["outcome"], result["counts"])
+    if result["outcome"] in BROKEN_OUTCOMES:
+        _alert_once_a_day(result["outcome"], _describe(result))
+    return result["outcome"]
 
 
-def handle_dispatch() -> None:
+def handle_dispatch() -> str | None:
     """Webhook mode: a Cloudflare Worker already read the Telegram update and
     forwarded it as a repository_dispatch event — getUpdates is not involved
     (and wouldn't work: setting a webhook disables polling on Telegram's side).
-    The event payload says what to do."""
+    The event payload says what to do. Returns the pipeline outcome if one ran."""
     with open(os.environ["GITHUB_EVENT_PATH"], encoding="utf-8") as f:
         payload = json.load(f).get("client_payload", {})
     action = payload.get("action", "")
@@ -350,7 +389,7 @@ def handle_dispatch() -> None:
 
     seen.init_db()
     if action == "news":
-        run_news()
+        return run_news()
     elif action == "feedback":
         seen.record_feedback(payload.get("hash", ""), payload.get("verdict", ""))
     elif action == "weekly":
@@ -361,11 +400,19 @@ def handle_dispatch() -> None:
         handle_topics_command(payload.get("text", "/topics"))
     else:
         logger.warning("Unknown dispatch action: %s", action)
+    return None
 
 
 if __name__ == "__main__":
     if os.environ.get("GITHUB_EVENT_NAME") == "repository_dispatch":
-        handle_dispatch()
+        outcomes = [handle_dispatch()]
     else:
-        poll()
-        auto_check()
+        # Both may run in one invocation; neither should mask the other.
+        outcomes = [poll(), auto_check()]
+
+    # A missing key is a misconfiguration that will never fix itself, so fail
+    # the workflow loudly. Everything else — including transient Gemini errors
+    # — stays green and is reported over Telegram instead.
+    if "no_api_key" in outcomes:
+        logger.error("Failing the run: GEMINI_API_KEYS is not configured.")
+        raise SystemExit(1)
