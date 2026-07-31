@@ -1,0 +1,13 @@
+# Cloudflare Worker config for the instant-trigger webhook.
+# Deploy from this directory with:  npx wrangler deploy
+#
+# Every value the Worker needs is a SECRET, not a var — see README.md. Nothing
+# sensitive belongs in this file; it is committed to a public repo.
+
+name = "news-bot-webhook"
+main = "worker.js"
+compatibility_date = "2026-07-31"
+
+# The Worker is pure request/response with no storage, so the free plan's
+# 100k requests/day is far beyond what one person's bot will ever use.
+workers_dev = true

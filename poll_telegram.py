@@ -91,6 +91,14 @@ def _get_updates(offset: int = None) -> list[dict]:
 
     try:
         resp = requests.get(url, params=params, timeout=10)
+        # 409 means a webhook is registered, so Telegram refuses getUpdates.
+        # That is the expected steady state in webhook mode (see the module
+        # docstring), not a fault — logging it as an error every scheduled run
+        # would bury the failures that do matter. Auto-push still runs.
+        if resp.status_code == 409:
+            logger.info("Webhook mode active — skipping getUpdates; commands "
+                        "arrive via repository_dispatch.")
+            return []
         resp.raise_for_status()
         result = resp.json()
         if result.get("ok"):
@@ -400,8 +408,15 @@ def handle_dispatch() -> str | None:
         handle_stats()
     elif action == "topics":
         handle_topics_command(payload.get("text", "/topics"))
+    elif action == "auto":
+        handle_auto_command(payload.get("text", "/auto"))
+    elif action == "help":
+        telegram_sender.send_notice(HELP_TEXT)
     else:
+        # Never leave the owner hanging: an unroutable action is a bug here,
+        # but silence looks identical to a dead bot from the phone.
         logger.warning("Unknown dispatch action: %s", action)
+        telegram_sender.send_notice(HELP_TEXT)
     return None
 
 
