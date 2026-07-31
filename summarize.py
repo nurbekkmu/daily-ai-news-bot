@@ -68,11 +68,15 @@ def summarize_article(article: dict) -> dict:
         article["summarization_failed"] = False
 
     except Exception as e:
-        logger.error("Summarization failed for '%s': %s", article["title"], e)
+        detail = gemini.redact(str(e))
+        logger.error("Summarization failed for '%s': %s", article["title"], detail)
         # Mark as failed so caller can decide whether to send it
         article["summary"] = None
         article["hashtags"] = []
         article["summarization_failed"] = True
+        # Kept so the pipeline can put the real cause in the alert. Reading it
+        # off the phone beats signing in to read an Actions log.
+        article["summary_error"] = detail[:300]
     return article
 
 

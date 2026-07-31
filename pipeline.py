@@ -153,12 +153,15 @@ def run(auto: bool = False) -> dict:
     # A SKIP verdict ('unreliable') is the quality gate working as intended;
     # only genuine call errors count as failures, because those mean the key
     # is missing, invalid, or out of quota rather than the article being junk.
-    counts["failed"] = sum(
-        1
+    failures = [
+        a
         for items in selected_by_topic.values()
         for a in items
         if a.get("summarization_failed") and not a.get("unreliable")
-    )
+    ]
+    counts["failed"] = len(failures)
+    # One representative cause; they share a root when the key is the problem.
+    error = failures[0].get("summary_error", "") if failures else ""
 
     actually_sent = telegram_sender.send_digest(selected_by_topic)
     counts["sent"] = sum(len(v) for v in actually_sent.values())
@@ -171,4 +174,4 @@ def run(auto: bool = False) -> dict:
         outcome = "summarize_failed"
     else:
         outcome = "nothing_sent"
-    return {"outcome": outcome, "counts": counts}
+    return {"outcome": outcome, "counts": counts, "error": error}

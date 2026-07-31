@@ -161,7 +161,11 @@ def _describe(result: dict) -> str:
     trace = (f"\n\n(search {c['search']}, feeds {c['rss']}, new {c['unseen']}, "
              f"after dedup {c['deduped']}, selected {c['selected']}, "
              f"failed {c['failed']}, delivered {c['sent']})")
-    return OUTCOME_REASONS[result["outcome"]] + trace
+    # The underlying API error names the actual problem — expired key, quota,
+    # unsupported region — which the generic reason text can only guess at.
+    error = result.get("error", "")
+    detail = f"\n\nGemini said:\n{error}" if error else ""
+    return OUTCOME_REASONS[result["outcome"]] + detail + trace
 
 
 def run_news() -> str:

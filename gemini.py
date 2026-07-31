@@ -42,6 +42,16 @@ def _next_client() -> tuple[genai.Client, int]:
     return _clients[key], key_idx
 
 
+def redact(text: str) -> str:
+    """Strip configured API keys out of text before it reaches a log or a
+    Telegram message. Google's errors quote the request URL, which carries
+    the key, and this repo's Actions logs are public."""
+    for key in config.GEMINI_API_KEYS:
+        if key:
+            text = text.replace(key, "***GEMINI_KEY***")
+    return text
+
+
 def _is_rate_limit_error(err: Exception) -> bool:
     msg = str(err)
     return (
